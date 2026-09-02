@@ -13,6 +13,11 @@
 #   1. Input invalidi (ENVIRONMENT, argomenti mancanti) — exit 2, JSON valido
 #   2. Envelope completo su fixture reale — exit 0, tutte le chiavi presenti
 #   3. Test specifici per tool (log_not_found, unsupported_version, parametri opzionali)
+#
+# Modalità argomenti posizionali:
+#   env_only=1   — tool con solo ENVIRONMENT (list_known_hosts, list_all_hosts_and_instances)
+#   host_only=1  — tool con ENVIRONMENT + HOSTNAME (list_instances_on_host, list_known_instances)
+#   default      — tool con ENVIRONMENT + HOSTNAME + INSTANCE_NAME
 
 set -uo pipefail
 
@@ -126,15 +131,19 @@ test_envelope() {
 }
 
 # --- Test: input invalidi comuni (ENVIRONMENT + args mancanti) ----------------
-# Per list_instances_on_host (solo 2 arg) passare host_only=1
+# env_only=1  — tool con solo ENVIRONMENT (es. list_known_hosts)
+# host_only=1 — tool con ENVIRONMENT + HOSTNAME (es. list_instances_on_host)
+# default     — tool con ENVIRONMENT + HOSTNAME + INSTANCE_NAME
 
 test_invalid_inputs() {
-    local script="$1" tool_name="$2" host_only="${3:-0}"
+    local script="$1" tool_name="$2" host_only="${3:-0}" env_only="${4:-0}"
     printf "\n  [input invalidi]\n"
 
     # ENVIRONMENT non nell'enum → exit 2 o JSON invalid_environment
     local out rc=0
-    if [ "$host_only" = "1" ]; then
+    if [ "$env_only" = "1" ]; then
+        out=$("$script" "INVALID" 2>/dev/null) || rc=$?
+    elif [ "$host_only" = "1" ]; then
         out=$("$script" "INVALID" "axnporadb41" 2>/dev/null) || rc=$?
     else
         out=$("$script" "INVALID" "axnporadb41" "NP41CDB0" 2>/dev/null) || rc=$?
@@ -147,23 +156,25 @@ test_invalid_inputs() {
         _fail "ENVIRONMENT invalido non gestito (rc=$rc)"
     fi
 
-    # HOSTNAME vuoto → exit 2 o JSON invalid_argument
-    rc=0
-    if [ "$host_only" = "1" ]; then
-        out=$("$script" "TEST" "" 2>/dev/null) || rc=$?
-    else
-        out=$("$script" "TEST" "" "NP41CDB0" 2>/dev/null) || rc=$?
-    fi
-    if [ "$rc" = "2" ]; then
-        _ok "HOSTNAME vuoto → exit 2"
-    elif [ "$rc" = "1" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1; then
-        _ok "HOSTNAME vuoto → JSON invalid_argument"
-    else
-        _fail "HOSTNAME vuoto non gestito (rc=$rc)"
+    # HOSTNAME vuoto (non si applica ai tool env_only)
+    if [ "$env_only" = "0" ]; then
+        rc=0
+        if [ "$host_only" = "1" ]; then
+            out=$("$script" "TEST" "" 2>/dev/null) || rc=$?
+        else
+            out=$("$script" "TEST" "" "NP41CDB0" 2>/dev/null) || rc=$?
+        fi
+        if [ "$rc" = "2" ]; then
+            _ok "HOSTNAME vuoto → exit 2"
+        elif [ "$rc" = "1" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1; then
+            _ok "HOSTNAME vuoto → JSON invalid_argument"
+        else
+            _fail "HOSTNAME vuoto non gestito (rc=$rc)"
+        fi
     fi
 
-    # INSTANCE_NAME vuoto (solo per tool a 3 argomenti) → exit 2 o JSON invalid_argument
-    if [ "$host_only" = "0" ]; then
+    # INSTANCE_NAME vuoto (solo per tool a 3 argomenti)
+    if [ "$host_only" = "0" ] && [ "$env_only" = "0" ]; then
         rc=0
         out=$("$script" "TEST" "axnporadb41" "" 2>/dev/null) || rc=$?
         if [ "$rc" = "2" ]; then
@@ -193,18 +204,49 @@ test_fixture() {
         extra_args+=("$line")
     done < <(grep "^#ARGS=" "$fixture" | cut -d= -f2-)
 
-    if [ -z "$env" ] || [ -z "$host" ]; then
-        _fail "fixture $fixture: mancano #ENV= o #HOST= nei commenti"
+    # Determina se il tool è env_only (un solo argomento posizionale)
+    local is_env_only=0
+    case "$tool_name" in
+        list_known_hosts|list_all_hosts_and_instances) is_env_only=1 ;;
+    esac
+
+    if [ -z "$env" ]; then
+        _fail "fixture $fixture: manca #ENV= nei commenti"
+        return
+    fi
+    if [ "$is_env_only" = "0" ] && [ -z "$host" ]; then
+        _fail "fixture $fixture: manca #HOST= nei commenti"
         return
     fi
 
     local out rc=0
-    if [ -z "$inst" ]; then
+    if [ "$is_env_only" = "1" ]; then
+        out=$("$script" "$env" "${extra_args[@]+"${extra_args[@]}"}" 2>/dev/null) || rc=$?
+    elif [ -z "$inst" ]; then
         out=$("$script" "$env" "$host" "${extra_args[@]+"${extra_args[@]}"}" 2>/dev/null) || rc=$?
     else
         out=$("$script" "$env" "$host" "$inst" "${extra_args[@]+"${extra_args[@]}"}" 2>/dev/null) || rc=$?
     fi
     test_envelope "fixture" "$out" "$rc" "ok"
+}
+
+# --- Test: NFS inesistente per tool env_only (log_not_found) ------------------
+
+test_nfs_not_found_env_only() {
+    local script="$1"
+    printf "\n  [NFS assente (env_only) → log_not_found o data vuota]\n"
+    # Con PROD l'NFS potrebbe non avere host prod su questo server di test.
+    # Usiamo EURO che punta a noprod ma con un host fake — il tool non fa SSH
+    # quindi restituirà data=[] o log_not_found.
+    local out rc=0
+    # Non possiamo testare connection_failed su tool NFS-only senza hostname.
+    # Il test più significativo è che ritorni JSON valido con status ok o error.
+    out=$("$script" "TEST" 2>/dev/null) || rc=$?
+    if _is_valid_json "$out"; then
+        _ok "NFS tool (env_only) restituisce JSON valido"
+    else
+        _fail "NFS tool (env_only) output non è JSON valido"
+    fi
 }
 
 # --- Test: host inesistente (connection_failed) --------------------------------
@@ -291,18 +333,34 @@ run_test() {
 
     printf "\n=== %s ===\n" "$tool_name"
 
-    # Determina se il tool accetta 2 o 3 argomenti posizionali
+    # Determina la modalità argomenti del tool
     local host_only=0
-    [ "$tool_name" = "list_instances_on_host" ] && host_only=1
+    local env_only=0
+    case "$tool_name" in
+        list_instances_on_host|list_known_instances)
+            host_only=1
+            ;;
+        list_known_hosts|list_all_hosts_and_instances)
+            env_only=1
+            ;;
+    esac
 
     # Test input invalidi (non richiedono connessione)
-    test_invalid_inputs "$script" "$tool_name" "$host_only"
+    test_invalid_inputs "$script" "$tool_name" "$host_only" "$env_only"
 
     if [ "$QUICK" = "0" ]; then
-        # Test host inesistente (connessione SSH fallisce rapidamente)
+        # Test host inesistente / NFS assente
         case "$tool_name" in
-            scan_alert_log|tail_alert_log)
-                # I tool di log non usano SSH — test log_not_found invece
+            scan_alert_log|tail_alert_log|get_alert_log_info)
+                # Tool di log/NFS — test log_not_found
+                test_log_not_found "$script" "$tool_name"
+                ;;
+            list_known_hosts|list_all_hosts_and_instances)
+                # Tool NFS env-only: verifica solo che ritorni JSON valido
+                test_nfs_not_found_env_only "$script"
+                ;;
+            list_known_instances)
+                # Tool NFS con hostname: un host fake → log_not_found
                 test_log_not_found "$script" "$tool_name"
                 ;;
             list_instances_on_host)

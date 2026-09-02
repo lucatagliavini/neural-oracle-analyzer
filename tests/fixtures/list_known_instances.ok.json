@@ -1,0 +1,4 @@
+#ENV=TEST
+#HOST=axnporadb41
+# Tool: list_known_instances — elenca istanze NFS su un host
+# Atteso: data=[{instance_name}...], host=axnporadb41

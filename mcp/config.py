@@ -4,10 +4,13 @@ Legge le variabili d'ambiente (da .env tramite python-dotenv o da environment
 di sistema). Il file .env NON è versionato; va creato manualmente sul server.
 
 Variabili riconosciute:
-    MCP_API_KEY   — chiave di autenticazione obbligatoria (X-API-Key header)
-    MCP_PORT      — porta uvicorn (default: 8420)
-    TOOLS_DIR     — path assoluto della directory tools/ (default: auto-detect)
-    TOOL_TIMEOUT  — timeout subprocess in secondi (default: 120)
+    MCP_API_KEY        — chiave di autenticazione obbligatoria (X-API-Key header)
+    MCP_PORT           — porta uvicorn (default: 8420)
+    TOOLS_DIR          — path assoluto della directory tools/ (default: auto-detect)
+    TOOL_TIMEOUT       — timeout subprocess in secondi (default: 120)
+    MCP_MAX_CONCURRENT — numero massimo di tools/call eseguiti contemporaneamente
+                         (default: 8). Limita il numero di processi SSH/sqlplus
+                         paralleli per evitare sovraccarico del server.
 """
 import os
 from pathlib import Path
@@ -31,3 +34,9 @@ TOOLS_DIR: Path = Path(os.environ.get("TOOLS_DIR", str(_PROJECT_ROOT / "tools"))
 
 # Timeout per ogni invocazione subprocess (secondi)
 TOOL_TIMEOUT: int = int(os.environ.get("TOOL_TIMEOUT", "120"))
+
+# Numero massimo di tools/call concorrenti (semaforo asyncio su mcp_endpoint).
+# Ogni chiamata orchestrata pesante (es. check_memory_pressure) lancia fino a 3
+# subprocess SSH/sqlplus in parallelo internamente. Con MCP_MAX_CONCURRENT=8 si
+# limitano a max 8*3=24 processi SSH attivi contemporaneamente.
+MCP_MAX_CONCURRENT: int = int(os.environ.get("MCP_MAX_CONCURRENT", "8"))

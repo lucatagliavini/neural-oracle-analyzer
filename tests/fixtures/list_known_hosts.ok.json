@@ -1,0 +1,3 @@
+#ENV=TEST
+# Tool: list_known_hosts — elenca host NFS per environment
+# Atteso: data=[{hostname}...], environment=TEST → noprod

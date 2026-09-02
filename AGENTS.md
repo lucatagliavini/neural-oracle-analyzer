@@ -12,13 +12,15 @@ This file provides guidance to agents when working with code in this repository.
 3. Solo se necessario per la milestone da avviare: leggere il file specs rilevante in [`docs/specs/`](docs/specs/).
 4. Non scrivere codice prima di aver completato i passi 1–2.
 
-**Ultimo file di sessione**: [`docs/sessions/2026-09-05.md`](docs/sessions/2026-09-05.md)
-— Stato: M0–M8 ✅ completate | M9 (git + hardening) ⬜ prossima milestone
-— 21 tool MCP attivi su `lxprworkerlana01:8420` | fix RAC env loader + fix find_alert_log NFS
+**Ultimo file di sessione**: [`docs/sessions/2026-09-06-2.md`](docs/sessions/2026-09-06-2.md)
+— Stato: M0–M9 ✅ completate | prossimo: git tag + SSL quando disponibile
+— 21 tool MCP attivi su `lxprworkerlana01:8420` | 525 test bash + 65 test MCP wire = 590 totali
+— TOOL-002 ✅ chiusa: scan_alert_log 388 MB con --since → 1.4s (era ~30s+)
+— Proxy HTTP attivo su porta 80 (SSL placeholder commentato)
 
 ## Project state
 
-M0–M8 completate. 17 tool primitivi bash + 4 Python orchestrati (`list_all_instances_status`, `diagnose_instance`, `check_memory_pressure`, `runbook_ora04030`) attivi su `lxprworkerlana01:8420`. 430/430 test suite passati (suite copre i 13 tool originali; estensione ai nuovi tool prevista in M9).
+M0–M9 completate. 17 tool primitivi bash + 4 Python orchestrati attivi su `lxprworkerlana01:8420`. 590 test (525 bash + 65 MCP wire). TOOL-002 risolta: pre-filtraggio I/O in scan_alert_log.sh — 1.4s su file da 388 MB con --since (era ~30s+). Proxy HTTP attivo su porta 80 con ProxyTimeout 300.
 `docs/specs/` è la fonte autoritativa — leggerla prima di scrivere codice.
 
 ## Goal

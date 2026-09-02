@@ -1,0 +1,3 @@
+#ENV=TEST
+# Tool: list_all_hosts_and_instances — inventario completo NFS
+# Atteso: data=[{hostname, instances:[...]}...], environment=TEST → noprod

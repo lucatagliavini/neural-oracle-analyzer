@@ -132,18 +132,20 @@ Ogni issue ha una priorità, un'area tecnica, il contesto di scoperta e i passi 
 
 ---
 
-### [TOOL-002] `scan_alert_log` supera il timeout MCP su file grandi (>300 MB) 🟡 P3
+### [TOOL-002] `scan_alert_log` supera il timeout MCP su file grandi (>300 MB) 🟡 P3 — ✅ RISOLTO
 
 | Campo | Valore |
 |---|---|
-| **Componente** | `tools/scan_alert_log.sh` + `mcp/config.py` (TOOL_TIMEOUT) |
+| **Componente** | `tools/scan_alert_log.sh` |
 | **Rilevato** | 2026-09-05, su SDC1/axprracdb03 (387 MB) |
+| **Risolto** | 2026-09-06 |
 
-**Descrizione**: Lo scan dell'alert log di SDC1 (387 MB) supera il timeout del tool (120s default), causando un errore MCP. Il tool funziona correttamente se eseguito direttamente sul server con `timeout 90`, ma richiede più del timeout configurato via MCP.
+**Soluzione implementata**: pre-filtraggio I/O con `grep -n` + `tail -n +N`.
+Quando `--since` è specificato, `grep` trova la prima riga della data richiesta e `tail`
+passa ad awk solo la porzione rilevante del file invece dell'intero log.
+Risultato: **1.4s** su SDC1 388 MB con `--since=14 giorni fa` (era ~30s+).
 
-**Azione suggerita**:
-1. Aumentare `TOOL_TIMEOUT` in `mcp/config.py` per i tool di log (es. 300s) o aggiungere un timeout specifico per `scan_alert_log`
-2. Considerare uno streaming incrementale o una pre-scansione con `tail` + `grep` per file molto grandi
+Vedere `docs/plans/tool-002-scan-prefilter-plan.md` per l'analisi completa.
 
 ---
 
@@ -155,3 +157,4 @@ Ogni issue ha una priorità, un'area tecnica, il contesto di scoperta e i passi 
 | INFRA-003 | `find` ricorsivo NFS bloccato su dir `cdmp_*` RAC → glob a profondità fissa | 2026-09-05 |
 | INFRA-004 | Server MCP irresponsivo durante chiamate parallele → `run_in_executor` | 2026-09-05 |
 | TOOL-001 | `scan_alert_log.sh` JSON invalido su byte non-ASCII (Latin-1) e backslash nel dizionario | 2026-09-05 |
+| TOOL-002 | `scan_alert_log` timeout su file grandi → pre-filtraggio I/O `grep -n` + `tail -n +N` | 2026-09-06 |

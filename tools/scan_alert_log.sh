@@ -85,6 +85,52 @@ if [ -z "$LOG_PATH" ]; then
     exit 1
 fi
 
+# --- Pre-filtraggio I/O quando --since è specificato --------------------------
+#
+# Strategia: quando FILTER_SINCE è impostato, usiamo grep -n per trovare la
+# prima riga che inizia con la data ISO richiesta, poi passiamo ad awk solo
+# la coda del file con tail -n +N. Questo riduce drasticamente l'I/O NFS su
+# file grandi (es. 388 MB → ~20 MB per un filtro "ultime 2 settimane").
+#
+# Prerequisito: il log deve usare il formato timestamp ISO 8601 (Oracle 12c+):
+#   "2026-09-01T08:16:43.043810+02:00"
+# I log con formato testuale puro 11g ("Tue Sep 01 08:16:43 2022") non hanno
+# righe che iniziano con YYYY-MM-DD e il pre-filtraggio verrebbe saltato.
+# Un log "misto" (startup 11g + body 12c+) è gestito correttamente: grep -m1
+# trova la prima riga ISO (anche se non è nelle primissime righe).
+#
+# Casi gestiti:
+#   1. FILTER_SINCE non impostato        → AWK_PREFILTER=0, awk legge LOG_PATH intero
+#   2. FILTER_SINCE impostato, ISO check OK, data trovata nel log
+#                                        → AWK_PREFILTER=1, awk legge tail -n +N
+#   3. FILTER_SINCE impostato, ISO check OK, data NON trovata (since oltre fine log)
+#                                        → data: [] diretto, senza passare per awk
+#   4. FILTER_SINCE impostato, nessuna riga ISO nel file (log 11g puro)
+#                                        → AWK_PREFILTER=0, awk legge file intero (fallback)
+
+AWK_PREFILTER=0
+AWK_SINCE_START_LINE=""
+
+if [ -n "$FILTER_SINCE" ]; then
+    # Verifica che il log contenga almeno una riga in formato ISO (12c+).
+    # grep -m1 si ferma alla prima hit → istantaneo anche su file da 400 MB.
+    has_iso=$(grep -m1 -cE "^[0-9]{4}-[0-9]{2}-[0-9]{2}T" "$LOG_PATH" 2>/dev/null || true)
+    if [ "${has_iso:-0}" -gt 0 ]; then
+        # Trova la prima riga che inizia con la data richiesta (YYYY-MM-DD)
+        AWK_SINCE_START_LINE=$(grep -n "^${FILTER_SINCE}" "$LOG_PATH" 2>/dev/null \
+            | head -1 | cut -d: -f1)
+        if [ -n "$AWK_SINCE_START_LINE" ]; then
+            AWK_PREFILTER=1
+        else
+            # Nessuna riga con quella data: il log non ha dati nel range richiesto.
+            # Restituiamo data: [] senza passare per awk (che non troverebbe nulla).
+            build_envelope "$TOOL" "$ENV" "$HOST" "$INST" "null" "ok" "[]" "null"
+            exit 0
+        fi
+    fi
+    # Se has_iso=0 (log 11g puro): AWK_PREFILTER rimane 0, awk filtra in-flight come prima.
+fi
+
 # --- Scansione ORA- con awk ---------------------------------------------------
 
 # Carica il dizionario ora_errors.json se disponibile
@@ -196,13 +242,25 @@ END {
     }
 }
 AWK
-scan_output=$(LC_ALL=C awk \
-    -v filter_code="$FILTER_CODE" \
-    -v filter_since="$FILTER_SINCE" \
-    -v filter_pdb="$FILTER_PDB" \
-    -f "${AWK_LIB}" \
-    -f "$_awk_tmp" \
-    "$LOG_PATH")
+# Due branch espliciti per evitare il gotcha bash della process substitution
+# in variabile (<(cmd) salvato come stringa non funziona all'espansione).
+if [ "$AWK_PREFILTER" = "1" ]; then
+    scan_output=$(LC_ALL=C awk \
+        -v filter_code="$FILTER_CODE" \
+        -v filter_since="$FILTER_SINCE" \
+        -v filter_pdb="$FILTER_PDB" \
+        -f "${AWK_LIB}" \
+        -f "$_awk_tmp" \
+        <(tail -n +"$AWK_SINCE_START_LINE" "$LOG_PATH"))
+else
+    scan_output=$(LC_ALL=C awk \
+        -v filter_code="$FILTER_CODE" \
+        -v filter_since="$FILTER_SINCE" \
+        -v filter_pdb="$FILTER_PDB" \
+        -f "${AWK_LIB}" \
+        -f "$_awk_tmp" \
+        "$LOG_PATH")
+fi
 rm -f "$_awk_tmp"
 
 # --- Arricchimento con ora_errors.json + costruzione array JSON ---------------

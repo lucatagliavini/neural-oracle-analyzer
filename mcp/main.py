@@ -35,6 +35,17 @@ import config
 from orchestration import diagnose_instance, check_memory_pressure, runbook_ora04030
 from runner import run_primitive_tool
 
+# Semaforo globale che limita il numero di tools/call concorrenti.
+# Inizializzato in startup per poter usare il loop asyncio corretto.
+_call_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    global _call_semaphore
+    if _call_semaphore is None:
+        _call_semaphore = asyncio.Semaphore(config.MCP_MAX_CONCURRENT)
+    return _call_semaphore
+
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
@@ -735,8 +746,12 @@ async def mcp_endpoint(request: Request) -> JSONResponse:
         # Eseguirlo in un thread del default executor evita di bloccare
         # l'event loop asyncio, rendendo il server responsivo anche durante
         # chiamate lente o parallele.
+        # Il semaforo limita le chiamate concorrenti a MCP_MAX_CONCURRENT per
+        # evitare che chiamate parallele pesanti saturino le connessioni SSH.
+        sem = _get_semaphore()
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, _dispatch_tool, tool_name, arguments)
+        async with sem:
+            result = await loop.run_in_executor(None, _dispatch_tool, tool_name, arguments)
 
         return _jsonrpc_result(req_id, {
             "content": [
