@@ -1,0 +1,6 @@
+#ENV=TEST
+#HOST=axnporadb41
+#INST=NP41CDB0
+# Tool: top sessioni per PGA, default --limit=20
+# Atteso: data=[{pid, spid, username, status, machine, pga_used_mem, pga_alloc_mem, pga_freeable_mem, pga_max_mem}...]
+# Funziona su tutte le versioni Oracle (no viste multitenant)

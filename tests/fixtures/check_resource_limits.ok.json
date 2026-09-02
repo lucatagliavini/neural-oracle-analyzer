@@ -1,0 +1,5 @@
+#ENV=TEST
+#HOST=axnporadb41
+#INST=NP41CDB0
+# Tool: v$resource_limit per sessions e processes
+# Atteso: data=[{resource_name, current_utilization, max_utilization, limit_value}] (2 righe)

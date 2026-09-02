@@ -1,0 +1,38 @@
+[Unit]
+Description=Neural Oracle Analyzer — MCP FastAPI server
+Documentation=https://neural-mcp-oracle.servizi.gr-u.it
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/product/lana-bot/neural-oracle-analyzer/mcp
+
+# Variabili d'ambiente: la API key e la porta vengono lette dal file .env
+# Il file .env NON è versionato — va creato manualmente sul server.
+# Esempio minimo di .env:
+#   MCP_API_KEY=<chiave-segreta>
+#   MCP_PORT=8420
+EnvironmentFile=/product/lana-bot/neural-oracle-analyzer/mcp/.env
+
+ExecStart=/product/lana-bot/neural-oracle-analyzer/mcp/venv/bin/uvicorn \
+    main:app \
+    --host 0.0.0.0 \
+    --port $MCP_PORT \
+    --no-access-log
+
+# Riavvio automatico in caso di crash (non in caso di stop manuale)
+Restart=on-failure
+RestartSec=5s
+
+# Timeout ordinato prima di SIGKILL
+TimeoutStopSec=30
+
+# Output su journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=neural-oracle-mcp
+
+[Install]
+WantedBy=multi-user.target

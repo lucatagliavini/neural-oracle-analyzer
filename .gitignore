@@ -1,0 +1,21 @@
+# Secrets e configurazione locale — mai committare
+mcp/.env
+ssh_keys/
+
+# Virtual environment Python — ricreato da deploy.sh
+mcp/venv/
+
+# File temporanei awk generati dai tool
+/tmp/scan_alert_*.awk
+/tmp/tail_alert_*.awk
+
+# Cache e artefatti Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Editor e OS
+.DS_Store
+*.swp
+*.swo

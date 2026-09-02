@@ -1,0 +1,438 @@
+"""orchestration.py — tool orchestrati di livello 1 per Neural Oracle Analyzer.
+
+Ogni funzione pubblica combina più tool primitivi in sequenza o in parallelo,
+applica la logica del runbook DBA e restituisce un envelope arricchito con:
+  - summary: interpretazione in italiano dei risultati
+  - details: risultati raw di ogni primitivo invocato
+
+Convenzioni:
+  - Valori che provengono da Oracle (stati, codici, ruoli) restano in inglese.
+  - Campi interpretativi scritti da noi (summary, raccomandazioni, interpretazione) in italiano.
+  - Ogni funzione restituisce sempre un dict conforme all'envelope JSON del progetto.
+  - status="ok" anche se alcuni primitivi hanno fallito: il fallimento parziale è
+    rappresentato nei details e nel summary, non come errore dell'orchestrato.
+
+Tool esposti:
+    diagnose_instance(env, host, inst)      → discovery completa istanza
+    check_memory_pressure(env, host, inst)  → analisi pressione memoria/PGA
+    runbook_ora04030(env, host, inst, **kw) → runbook completo per ORA-04030
+"""
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+from runner import run_primitive_tool
+
+
+# ---------------------------------------------------------------------------
+# Helpers interni
+# ---------------------------------------------------------------------------
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _envelope(tool: str, env: str, host: str, inst: Optional[str],
+              data: list, summary: dict) -> dict:
+    """Costruisce l'envelope orchestrato con summary + details."""
+    return {
+        "tool": tool,
+        "generated_at": _now_iso(),
+        "environment": env,
+        "hostname": host,
+        "instance_name": inst,
+        "oracle_version": None,   # non applicabile agli orchestrati
+        "status": "ok",
+        "summary": summary,
+        "data": data,
+        "error": None,
+    }
+
+
+def _run_parallel(tasks: list[tuple]) -> dict[str, dict]:
+    """Esegue più chiamate run_primitive_tool in parallelo.
+
+    tasks: lista di (label, script_name, *args)
+    Restituisce dict {label: result}.
+    """
+    results: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=min(len(tasks), 8)) as executor:
+        future_map = {
+            executor.submit(run_primitive_tool, script, *args): label
+            for label, script, *args in tasks
+        }
+        for future in as_completed(future_map):
+            label = future_map[future]
+            try:
+                results[label] = future.result()
+            except Exception as exc:
+                results[label] = {
+                    "status": "error",
+                    "data": [],
+                    "error": {"code": "query_failed", "message": str(exc)},
+                }
+    return results
+
+
+def _ok(r: dict) -> bool:
+    return r.get("status") == "ok"
+
+
+def _data(r: dict) -> list:
+    return r.get("data", [])
+
+
+def _first(r: dict) -> Optional[dict]:
+    d = _data(r)
+    return d[0] if d else None
+
+
+# ---------------------------------------------------------------------------
+# diagnose_instance
+# ---------------------------------------------------------------------------
+
+def diagnose_instance(env: str, host: str, inst: str) -> dict:
+    """Discovery completa di una istanza Oracle.
+
+    Esegue in parallelo:
+      - identify_instance   → stato e versione
+      - list_pdbs           → PDB aperti (12c+)
+      - check_fra_usage     → stato Flash Recovery Area
+      - check_resource_limits → limiti sessioni/processi
+
+    Produce un summary con:
+      - stato generale dell'istanza
+      - PDB aperti/chiusi (se disponibili)
+      - eventuali criticità su FRA o limiti di risorsa
+    """
+    TOOL = "diagnose_instance"
+
+    tasks = [
+        ("instance",  "identify_instance",    env, host, inst),
+        ("pdbs",      "list_pdbs",             env, host, inst),
+        ("fra",       "check_fra_usage",       env, host, inst),
+        ("resources", "check_resource_limits", env, host, inst),
+    ]
+    res = _run_parallel(tasks)
+
+    # --- Analisi identify_instance ---
+    inst_row = _first(res["instance"])
+    if not _ok(res["instance"]) or not inst_row:
+        # Istanza non raggiungibile — interrompi con errore
+        return {
+            "tool": TOOL,
+            "generated_at": _now_iso(),
+            "environment": env,
+            "hostname": host,
+            "instance_name": inst,
+            "oracle_version": None,
+            "status": "error",
+            "summary": {},
+            "data": [],
+            "error": res["instance"].get("error") or {
+                "code": "connection_failed",
+                "message": "Impossibile raggiungere l'istanza Oracle.",
+            },
+        }
+
+    oracle_version = res["instance"].get("oracle_version")
+    instance_status = inst_row.get("status")          # OPEN / MOUNTED
+    db_status = inst_row.get("database_status")        # ACTIVE / SUSPENDED
+    instance_role = inst_row.get("instance_role")      # PRIMARY_INSTANCE
+    startup_time = inst_row.get("startup_time")
+
+    # --- Analisi PDB ---
+    pdbs_available = _ok(res["pdbs"])
+    pdbs_open = [p for p in _data(res["pdbs"]) if p.get("open_mode") == "READ WRITE"]
+    pdbs_restricted = [p for p in _data(res["pdbs"]) if p.get("restricted") == "YES"]
+    pdbs_closed = [p for p in _data(res["pdbs"])
+                   if p.get("open_mode") not in ("READ WRITE", "READ ONLY")]
+
+    # --- Analisi FRA ---
+    fra_criticita = []
+    if _ok(res["fra"]):
+        for row in _data(res["fra"]):
+            pct = row.get("pct_space_used", 0) or 0
+            if float(pct) >= 90:
+                fra_criticita.append(
+                    f"FRA al {pct}% — rischio blocco archivelog"
+                )
+            elif float(pct) >= 75:
+                fra_criticita.append(
+                    f"FRA al {pct}% — monitorare utilizzo"
+                )
+
+    # --- Analisi resource limits ---
+    resource_criticita = []
+    if _ok(res["resources"]):
+        for row in _data(res["resources"]):
+            name = row.get("resource_name", "")
+            current = row.get("current_utilization")
+            limit = row.get("max_utilization") or row.get("limit_value")
+            try:
+                if limit and int(limit) > 0:
+                    pct = int(current or 0) / int(limit) * 100
+                    if pct >= 90:
+                        resource_criticita.append(
+                            f"{name}: {current}/{limit} ({pct:.0f}%) — vicino al limite"
+                        )
+            except (ValueError, TypeError):
+                pass
+
+    # --- Costruzione summary ---
+    criticita = fra_criticita + resource_criticita
+    if instance_status == "OPEN" and db_status == "ACTIVE":
+        stato_generale = "L'istanza è operativa e accessibile."
+    elif instance_status == "MOUNTED":
+        stato_generale = "L'istanza è in stato MOUNTED — il database non è aperto."
+    else:
+        stato_generale = f"L'istanza è in stato {instance_status}/{db_status}."
+
+    summary = {
+        "stato_generale": stato_generale,
+        "instance_status": instance_status,
+        "database_status": db_status,
+        "instance_role": instance_role,
+        "oracle_version": oracle_version,
+        "startup_time": startup_time,
+        "pdbs": {
+            "disponibili": pdbs_available,
+            "totale": len(_data(res["pdbs"])),
+            "aperti_read_write": len(pdbs_open),
+            "in_restricted": len(pdbs_restricted),
+            "chiusi_o_mounted": len(pdbs_closed),
+        } if pdbs_available else {"disponibili": False, "motivo": "non supportato (Oracle 11g) o errore"},
+        "criticita": criticita if criticita else ["Nessuna criticità rilevata."],
+    }
+
+    data = [
+        {"sezione": "instance",  "result": res["instance"]},
+        {"sezione": "pdbs",      "result": res["pdbs"]},
+        {"sezione": "fra",       "result": res["fra"]},
+        {"sezione": "resources", "result": res["resources"]},
+    ]
+
+    env_out = _envelope(TOOL, env, host, inst, data, summary)
+    env_out["oracle_version"] = oracle_version
+    return env_out
+
+
+# ---------------------------------------------------------------------------
+# check_memory_pressure
+# ---------------------------------------------------------------------------
+
+def check_memory_pressure(env: str, host: str, inst: str) -> dict:
+    """Analisi pressione memoria/PGA su una istanza Oracle.
+
+    Esegue:
+      - top_pga_sessions (top 20) → sessioni più costose in memoria
+      - pga_by_pdb_session        → distribuzione PGA per PDB (12c+)
+      - pga_sga_by_pdb            → utilizzo PGA/SGA aggregato per PDB (12c+)
+
+    Produce un summary con:
+      - sessione con PGA più alta e relativo utente
+      - distribuzione della memoria tra PDB
+      - valutazione della pressione complessiva
+    """
+    TOOL = "check_memory_pressure"
+
+    # top_pga_sessions è sequenziale (serve per capire versione e dati base)
+    top_res = run_primitive_tool("top_pga_sessions", env, host, inst)
+
+    # Gli altri due in parallelo
+    tasks = [
+        ("pga_pdb_sess", "pga_by_pdb_session", env, host, inst),
+        ("pga_sga",      "pga_sga_by_pdb",     env, host, inst),
+    ]
+    par = _run_parallel(tasks)
+
+    oracle_version = top_res.get("oracle_version")
+
+    # --- Analisi top PGA sessions ---
+    top_sessions = _data(top_res)
+    if top_sessions:
+        top1 = top_sessions[0]
+        top_pga_mb = round(int(top1.get("pga_alloc_mem", 0)) / 1024 / 1024, 1)
+        total_pga_mb = round(
+            sum(int(s.get("pga_alloc_mem", 0)) for s in top_sessions) / 1024 / 1024, 1
+        )
+        sessione_top = (
+            f"{top1.get('username', 'SYS')} (SID non disponibile)"
+            f" — {top_pga_mb} MB PGA allocata"
+        )
+    else:
+        top_pga_mb = 0
+        total_pga_mb = 0
+        sessione_top = "Nessuna sessione rilevata."
+
+    # --- Analisi distribuzione PDB ---
+    pdb_distribuzione = []
+    if _ok(par["pga_pdb_sess"]):
+        pdb_totals: dict[str, int] = {}
+        for row in _data(par["pga_pdb_sess"]):
+            pdb = row.get("pdb_name") or "CDB$ROOT"
+            pdb_totals[pdb] = pdb_totals.get(pdb, 0) + int(row.get("pga_used_mem", 0) or 0)
+        for pdb, total in sorted(pdb_totals.items(), key=lambda x: -x[1]):
+            pdb_distribuzione.append({
+                "pdb": pdb,
+                "pga_mb": round(total / 1024 / 1024, 1),
+            })
+
+    # --- Valutazione pressione ---
+    if top_pga_mb >= 2048:
+        livello_pressione = "alta"
+        valutazione = (
+            f"La sessione con maggior consumo usa {top_pga_mb} MB di PGA. "
+            "Verificare query con large sort o hash join; considerare PGA_AGGREGATE_TARGET."
+        )
+    elif top_pga_mb >= 512:
+        livello_pressione = "media"
+        valutazione = (
+            f"Utilizzo PGA nella norma per carichi intensivi ({top_pga_mb} MB sulla sessione top). "
+            "Monitorare in caso di degradazione delle performance."
+        )
+    else:
+        livello_pressione = "bassa"
+        valutazione = (
+            f"Nessuna pressione rilevante sulla memoria di processo ({top_pga_mb} MB sulla sessione top)."
+        )
+
+    summary = {
+        "livello_pressione": livello_pressione,
+        "valutazione": valutazione,
+        "sessione_top_pga": sessione_top,
+        "totale_pga_top20_mb": total_pga_mb,
+        "distribuzione_per_pdb": pdb_distribuzione,
+        "pga_sga_per_pdb_disponibile": _ok(par["pga_sga"]),
+    }
+
+    data = [
+        {"sezione": "top_pga_sessions",  "result": top_res},
+        {"sezione": "pga_by_pdb_session","result": par["pga_pdb_sess"]},
+        {"sezione": "pga_sga_by_pdb",    "result": par["pga_sga"]},
+    ]
+
+    env_out = _envelope(TOOL, env, host, inst, data, summary)
+    env_out["oracle_version"] = oracle_version
+    return env_out
+
+
+# ---------------------------------------------------------------------------
+# runbook_ora04030
+# ---------------------------------------------------------------------------
+
+def runbook_ora04030(env: str, host: str, inst: str,
+                     since: Optional[str] = None,
+                     pdb: Optional[str] = None) -> dict:
+    """Runbook completo per la diagnosi di ORA-04030 (out of process memory).
+
+    Passi:
+      1. scan_alert_log filtrando ORA-04030 → verifica presenza e frequenza
+      2. Se ORA-04030 presente → check_memory_pressure → analisi PGA
+      3. get_alert_log_info → metadati log (età, dimensione)
+
+    Produce un summary con:
+      - se ORA-04030 è presente, quante occorrenze e in quali PDB
+      - valutazione della pressione memoria al momento della diagnosi
+      - raccomandazioni operative
+    """
+    TOOL = "runbook_ora04030"
+
+    # Step 1: scan alert log per ORA-04030
+    scan_args = [env, host, inst, "--code=ORA-04030"]
+    if since:
+        scan_args.append(f"--since={since}")
+    if pdb:
+        scan_args.append(f"--pdb={pdb}")
+    scan_res = run_primitive_tool("scan_alert_log", *scan_args)
+
+    # Step 2 e 3 in parallelo (indipendenti da step 1)
+    tasks = [
+        ("memory",   "_orchestrated_check_memory_pressure", env, host, inst),
+        ("log_info", "get_alert_log_info",                  env, host, inst),
+    ]
+    # check_memory_pressure è orchestrato — lo chiamiamo direttamente
+    log_info_res = run_primitive_tool("get_alert_log_info", env, host, inst)
+    memory_res = check_memory_pressure(env, host, inst)
+
+    oracle_version = scan_res.get("oracle_version") or memory_res.get("oracle_version")
+
+    # --- Analisi ORA-04030 nell'alert log ---
+    ora04030_occurrences = _data(scan_res)
+    totale_eventi = sum(int(r.get("count", 0)) for r in ora04030_occurrences)
+    pdb_coinvolti = [r.get("pdb_name") or "CDB$ROOT" for r in ora04030_occurrences]
+    last_seen = max(
+        (r.get("last_seen", "") for r in ora04030_occurrences),
+        default=None,
+    ) or None
+
+    # --- Log info ---
+    log_row = _first(log_info_res)
+    age_hours = log_row.get("age_hours") if log_row else None
+
+    # --- Costruzione raccomandazioni ---
+    raccomandazioni = []
+    memory_summary = memory_res.get("summary", {})
+    livello = memory_summary.get("livello_pressione", "sconosciuto")
+
+    if totale_eventi == 0:
+        presenza = "ORA-04030 non trovato nell'alert log nel periodo analizzato."
+        if since:
+            presenza += f" (filtro: dal {since})"
+    else:
+        presenza = (
+            f"ORA-04030 rilevato {totale_eventi} volta/e, "
+            f"ultimo evento: {last_seen}, "
+            f"PDB coinvolti: {', '.join(set(pdb_coinvolti))}."
+        )
+        raccomandazioni.append(
+            "Verificare i parametri PGA_AGGREGATE_TARGET e MEMORY_TARGET — "
+            "ORA-04030 indica che un processo Oracle non riesce ad allocare memoria."
+        )
+        if livello == "alta":
+            raccomandazioni.append(
+                "La pressione PGA è attualmente ALTA: agire con priorità. "
+                "Identificare la sessione top con check_memory_pressure e terminare "
+                "le query con consumo anomalo."
+            )
+        elif livello == "media":
+            raccomandazioni.append(
+                "La pressione PGA è MEDIA: monitorare. "
+                "Valutare incremento di PGA_AGGREGATE_TARGET se gli eventi si ripetono."
+            )
+        else:
+            raccomandazioni.append(
+                "La pressione PGA è attualmente BASSA: l'evento potrebbe essere transitorio. "
+                "Verificare se il picco era legato a una query specifica (controllare i campioni nell'alert log)."
+            )
+        if pdb_coinvolti and any(p != "CDB$ROOT" for p in pdb_coinvolti):
+            pdb_unici = list({p for p in pdb_coinvolti if p != "CDB$ROOT"})
+            raccomandazioni.append(
+                f"I PDB {', '.join(pdb_unici)} hanno generato errori ORA-04030: "
+                "verificare i limiti di memoria assegnati a ciascun PDB."
+            )
+
+    if not raccomandazioni:
+        raccomandazioni.append("Nessuna azione immediata richiesta.")
+
+    summary = {
+        "presenza_ora04030": presenza,
+        "totale_eventi": totale_eventi,
+        "pdb_coinvolti": list(set(pdb_coinvolti)) if totale_eventi > 0 else [],
+        "ultimo_evento": last_seen,
+        "pressione_memoria_attuale": livello,
+        "log_age_hours": age_hours,
+        "raccomandazioni": raccomandazioni,
+    }
+
+    data = [
+        {"sezione": "scan_alert_log_ora04030", "result": scan_res},
+        {"sezione": "check_memory_pressure",   "result": memory_res},
+        {"sezione": "get_alert_log_info",       "result": log_info_res},
+    ]
+
+    env_out = _envelope(TOOL, env, host, inst, data, summary)
+    env_out["oracle_version"] = oracle_version
+    return env_out

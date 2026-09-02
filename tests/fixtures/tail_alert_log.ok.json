@@ -1,0 +1,6 @@
+#ENV=TEST
+#HOST=axnporadb41
+#INST=NP41CDB0
+# Tool: alert log via NFS — ultime 2000 righe (default)
+# Atteso: data=[{line_number, text}...], oracle_version=null
+# NFS mount atteso: /unipol/logs/database/oracle/noprod/axnporadb41/

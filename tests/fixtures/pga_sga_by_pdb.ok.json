@@ -1,0 +1,6 @@
+#ENV=TEST
+#HOST=axnporadb41
+#INST=NP41CDB0
+# Tool: PGA/SGA per PDB via v$rsrcpdbmetric (richiede 12c+ e Resource Manager attivo)
+# Atteso: data=[] se Resource Manager non attivo, oppure [{con_id, pdb_name, pga_bytes, sga_bytes, ...}]
+# NP41CDB0 è Oracle 19c → nessun unsupported_version

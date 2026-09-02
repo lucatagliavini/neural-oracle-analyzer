@@ -1,0 +1,5 @@
+#ENV=TEST
+#HOST=axnporadb41
+# Nessun #INST= — list_instances_on_host accetta solo 2 argomenti (ENV HOST)
+# Tool: restituisce i CDB ospitati sull'host via SSH ls ~/NP*.env
+# Atteso: data=[{instance_name, env_path}...], oracle_version=null

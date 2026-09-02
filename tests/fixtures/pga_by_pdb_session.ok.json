@@ -1,0 +1,6 @@
+#ENV=TEST
+#HOST=axnporadb41
+#INST=NP41CDB0
+# Tool: PGA per sessione + PDB, join v$session/v$process/cdb_pdbs (richiede 12c+)
+# Atteso: data=[{con_id, pdb_name, username, status, pga_used_mem, pga_alloc_mem}...]
+# NP41CDB0 è Oracle 19c → nessun unsupported_version

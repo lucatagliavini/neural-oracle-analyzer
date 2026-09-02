@@ -1,0 +1,5 @@
+#ENV=TEST
+#HOST=axnporadb41
+#INST=NP41CDB0
+# Tool: v$parameter diagnostic_dest
+# Atteso: data=[{name, type, value}] con value=/product/oracle (validato su axnporadb41)

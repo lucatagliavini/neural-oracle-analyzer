@@ -1,0 +1,6 @@
+#ENV=TEST
+#HOST=axnporadb41
+#INST=NP41CDB0
+# Tool: alert log scan ORA- errors
+# Atteso: data=[{code, pdb_name, description, category, severity, count, first_seen, last_seen, samples[]}...]
+# NFS mount atteso: /unipol/logs/database/oracle/noprod/axnporadb41/

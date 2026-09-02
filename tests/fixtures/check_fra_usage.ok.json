@@ -1,0 +1,6 @@
+#ENV=TEST
+#HOST=axnporadb41
+#INST=NP41CDB1
+# Tool: FRA con 3 query (fra_dest, fra_usage, fra_size)
+# Nota: NP41CDB1 ha FRA configurata (100GB limit, 3.4GB used) — validato in M4
+# Atteso: data contiene oggetti con source in {fra_dest, fra_usage, fra_size}
