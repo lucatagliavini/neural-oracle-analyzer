@@ -361,7 +361,7 @@ run_test() {
     local env_only=0
     case "$tool_name" in
         list_instances_on_host|list_known_instances|\
-        os_cpu_stats|os_memory_stats|os_disk_stats)
+        os_cpu_stats|os_memory_stats|os_disk_stats|os_network_stats)
             host_only=1
             ;;
         list_known_hosts|list_all_hosts_and_instances)
@@ -387,7 +387,7 @@ run_test() {
                 # Tool NFS con hostname: un host fake → log_not_found
                 test_log_not_found "$script" "$tool_name"
                 ;;
-            list_instances_on_host|os_cpu_stats|os_memory_stats|os_disk_stats)
+            list_instances_on_host|os_cpu_stats|os_memory_stats|os_disk_stats|os_network_stats)
                 test_bad_host "$script" "1"
                 ;;
             *)
@@ -400,7 +400,7 @@ run_test() {
             top_pga_sessions)
                 test_top_pga_limit "$script"
                 ;;
-            os_cpu_stats|os_memory_stats|os_disk_stats)
+            os_cpu_stats|os_memory_stats|os_disk_stats|os_network_stats)
                 test_os_tool_params "$script" "$tool_name"
                 ;;
         esac

@@ -319,6 +319,17 @@ TOOL_CATALOG: list[dict] = [
         ),
         "params": ["environment", "hostname", "samples?", "interval?", "fs?"],
     },
+    {
+        "name": "os_network_stats",
+        "description": (
+            "OS MONITORING — Raccoglie metriche di rete dal server (netstat -In su AIX, "
+            "/proc/net/dev su Linux): rx/tx bytes/sec, errori e drop per interfaccia. "
+            "Parametro opzionale --iface per filtrare una singola interfaccia. "
+            "Campionamento multiplo con statistiche aggregate. "
+            "Parametri opzionali: samples (default 5), interval (default 2s), iface."
+        ),
+        "params": ["environment", "hostname", "samples?", "interval?", "iface?"],
+    },
     # --- Runbook orchestrati (M8) ---
     {
         "name": "diagnose_instance",
@@ -357,7 +368,7 @@ TOOL_CATALOG: list[dict] = [
         "name": "diagnose_os_pressure",
         "description": (
             "RUNBOOK — Analisi pressione OS correlata con stato Oracle in una chiamata sola. "
-            "Esegue in parallelo: os_cpu_stats, os_memory_stats, os_disk_stats, "
+            "Esegue in parallelo: os_cpu_stats, os_memory_stats, os_disk_stats, os_network_stats, "
             "check_memory_pressure, check_resource_limits, sessions_by_user. "
             "Restituisce livello_pressione_os (bassa/media/alta), livello_pressione_oracle, "
             "correlazioni cross-domain e raccomandazioni. "
@@ -746,6 +757,28 @@ MCP_TOOLS: list[dict] = [
             "required": ["environment", "hostname"],
         },
     },
+    {
+        "name": "os_network_stats",
+        "description": (
+            "OS MONITORING — Metriche di rete del server OS: rx/tx bytes/sec per interfaccia, "
+            "errori e drop cumulativi (rx_errors, tx_errors, rx_drops, tx_drops). "
+            "AIX: netstat -In. Linux: /proc/net/dev. "
+            "Non richiede instance_name: opera a livello OS. "
+            "Parametro iface opzionale per filtrare una singola interfaccia (es. en0, eth0). "
+            "rx_errors > 0 o tx_errors > 0 indicano problemi di NIC o link. "
+            "Per analisi correlata OS+Oracle usare diagnose_os_pressure."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_ENV_HOST_PROPS,
+                "samples":  {"type": "integer", "description": "Numero di campioni (default: 5)", "minimum": 1},
+                "interval": {"type": "integer", "description": "Secondi tra campioni (default: 2)", "minimum": 0},
+                "iface":    {"type": "string",  "description": "Filtra per interfaccia (es. en0, eth0)"},
+            },
+            "required": ["environment", "hostname"],
+        },
+    },
     # --- Runbook orchestrati (M8) ---
     {
         "name": "diagnose_instance",
@@ -806,7 +839,7 @@ MCP_TOOLS: list[dict] = [
         "name": "diagnose_os_pressure",
         "description": (
             "RUNBOOK — Analisi pressione a livello server (OS + Oracle) in una chiamata sola. "
-            "Esegue in parallelo: os_cpu_stats, os_memory_stats, os_disk_stats, "
+            "Esegue in parallelo: os_cpu_stats, os_memory_stats, os_disk_stats, os_network_stats, "
             "check_memory_pressure, check_resource_limits, sessions_by_user. "
             "Restituisce: livello_pressione_os (bassa/media/alta), livello_pressione_oracle, "
             "metriche_os (cpu_wait%, run_queue, ram_free%, swap_used%, page_out/s, disk_await), "
@@ -1008,7 +1041,7 @@ def _dispatch_tool(name: str, args: dict) -> dict:
             pdb=args.get("pdb"),
         )
 
-    if name in ("os_cpu_stats", "os_memory_stats", "os_disk_stats"):
+    if name in ("os_cpu_stats", "os_memory_stats", "os_disk_stats", "os_network_stats"):
         extra = []
         if args.get("samples") is not None:
             extra.append(f"--samples={args['samples']}")
@@ -1016,6 +1049,8 @@ def _dispatch_tool(name: str, args: dict) -> dict:
             extra.append(f"--interval={args['interval']}")
         if name == "os_disk_stats" and args.get("fs"):
             extra.append(f"--fs={args['fs']}")
+        if name == "os_network_stats" and args.get("iface"):
+            extra.append(f"--iface={args['iface']}")
         return run_primitive_tool(name, env, host, *extra)
 
     if name == "diagnose_os_pressure":

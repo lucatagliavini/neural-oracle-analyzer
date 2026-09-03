@@ -137,8 +137,9 @@ Ogni tool richiama questa libreria e si occupa solo della query specifica e dell
 | OS Monitoring | `os_cpu_stats.sh` | `vmstat` via SSH — CPU user/sys/idle/wait%, run queue; AIX e Linux |
 | OS Monitoring | `os_memory_stats.sh` | `svmon -G`+`lsps -s` (AIX) o `free -b` (Linux) + `vmstat` per page in/out |
 | OS Monitoring | `os_disk_stats.sh` | `df -k` (filesystem) + `iostat` (I/O) via SSH; `--fs=` per filtro mount point |
+| OS Monitoring | `os_network_stats.sh` | `netstat -In` (AIX) o `/proc/net/dev` (Linux) — rx/tx bytes/sec, errori e drop NIC; `--iface=` per filtro |
 
-Fuori perimetro per lo step attuale: analisi grafici OEM, access plan, wait event, uso CPU/I/O da OEM. Tool di rete OS (`os_network_stats.sh`) in BACKLOG secondo round.
+Fuori perimetro: analisi grafici OEM, access plan, wait event, uso CPU/I/O da OEM.
 
 ## Libreria OS (`lib/os_cmd.sh`)
 

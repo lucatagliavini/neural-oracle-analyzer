@@ -447,9 +447,10 @@ def diagnose_os_pressure(env: str, host: str, inst: str,
     """Analisi pressione OS correlata con stato Oracle.
 
     Esegue in parallelo:
-      - os_cpu_stats    → CPU user/sys/idle/wait%, run queue
-      - os_memory_stats → RAM/swap usage, page in/out
-      - os_disk_stats   → filesystem usage, I/O throughput/latenza
+      - os_cpu_stats     → CPU user/sys/idle/wait%, run queue
+      - os_memory_stats  → RAM/swap usage, page in/out
+      - os_disk_stats    → filesystem usage, I/O throughput/latenza
+      - os_network_stats → rx/tx bytes/sec, errori NIC per interfaccia
       - check_memory_pressure → PGA Oracle
       - check_resource_limits → limiti sessioni/processi Oracle
       - sessions_by_user      → sessioni Oracle attive per utente
@@ -467,11 +468,12 @@ def diagnose_os_pressure(env: str, host: str, inst: str,
     interval_arg = f"--interval={interval}"
 
     tasks = [
-        ("cpu",       "os_cpu_stats",          env, host, samples_arg, interval_arg),
-        ("memory",    "os_memory_stats",        env, host, samples_arg, interval_arg),
-        ("disk",      "os_disk_stats",          env, host, samples_arg, interval_arg),
-        ("resources", "check_resource_limits",  env, host, inst),
-        ("sessions",  "sessions_by_user",       env, host, inst),
+        ("cpu",     "os_cpu_stats",         env, host, samples_arg, interval_arg),
+        ("memory",  "os_memory_stats",      env, host, samples_arg, interval_arg),
+        ("disk",    "os_disk_stats",        env, host, samples_arg, interval_arg),
+        ("network", "os_network_stats",     env, host, samples_arg, interval_arg),
+        ("resources", "check_resource_limits", env, host, inst),
+        ("sessions",  "sessions_by_user",      env, host, inst),
     ]
     res = _run_parallel(tasks)
 
@@ -539,6 +541,24 @@ def diagnose_os_pressure(env: str, host: str, inst: str,
                 if await_p95 > disk_io_await_max:
                     disk_io_await_max = await_p95
 
+    # --- Analisi rete OS ---
+    net_rx_errors_total = 0
+    net_tx_errors_total = 0
+    net_rx_drops_total = 0
+    net_tx_drops_total = 0
+    net_interfaces: list[str] = []
+    if _ok(res["network"]):
+        net_data_list = res["network"].get("data", [])
+        net_data = net_data_list[0] if isinstance(net_data_list, list) and net_data_list else {}
+        if isinstance(net_data, dict):
+            for iface_row in net_data.get("interfaces", []):
+                iface_name = iface_row.get("iface", "")
+                net_interfaces.append(iface_name)
+                net_rx_errors_total += int(iface_row.get("rx_errors") or 0)
+                net_tx_errors_total += int(iface_row.get("tx_errors") or 0)
+                net_rx_drops_total  += int(iface_row.get("rx_drops") or 0)
+                net_tx_drops_total  += int(iface_row.get("tx_drops") or 0)
+
     # --- Analisi Oracle resource limits ---
     resource_near_limit = []
     if _ok(res["resources"]):
@@ -596,6 +616,16 @@ def diagnose_os_pressure(env: str, host: str, inst: str,
     elif disk_io_await_max > 50:
         indicatori_gialli.append(f"latenza I/O disco p95 ({disk_io_await_max:.1f}ms) > 50ms")
 
+    net_errors_total = net_rx_errors_total + net_tx_errors_total
+    if net_errors_total > 100:
+        indicatori_rossi.append(
+            f"errori NIC totali ({net_errors_total}) > 100 — possibile problema di rete/link"
+        )
+    elif net_errors_total > 0:
+        indicatori_gialli.append(
+            f"errori NIC presenti (rx={net_rx_errors_total}, tx={net_tx_errors_total}) — monitorare"
+        )
+
     if len(indicatori_rossi) >= 2:
         livello_pressione_os = "alta"
     elif len(indicatori_rossi) == 1 or len(indicatori_gialli) >= 2:
@@ -636,6 +666,13 @@ def diagnose_os_pressure(env: str, host: str, inst: str,
             "probabile I/O da sort/hash su disco. Aumentare PGA_AGGREGATE_TARGET o ottimizzare le query."
         )
 
+    if net_errors_total > 0 and livello_pressione_oracle in ("alta", "media"):
+        correlazioni.append(
+            f"Errori NIC ({net_errors_total}) e pressione Oracle {livello_pressione_oracle}: "
+            "possibili timeout di connessione tra application server e DB. "
+            "Verificare l'interfaccia di rete e lo switch di rete."
+        )
+
     if resource_near_limit:
         correlazioni.append(
             "Oracle vicino ai limiti di risorse: " + "; ".join(resource_near_limit) + ". "
@@ -667,6 +704,12 @@ def diagnose_os_pressure(env: str, host: str, inst: str,
             f"Latenza disco elevata ({disk_io_await_max:.1f}ms p95): verificare saturazione storage. "
             "Considerare la distribuzione dei file Oracle su volumi separati."
         )
+    if net_errors_total > 0:
+        raccomandazioni.append(
+            f"Errori NIC rilevati (rx={net_rx_errors_total}, tx={net_tx_errors_total}, "
+            f"drop={net_rx_drops_total + net_tx_drops_total}): controllare lo stato del link "
+            "con 'entstat -d' (AIX) o 'ethtool' (Linux) e verificare i log dello switch."
+        )
     if livello_pressione_oracle == "alta":
         raccomandazioni.append(
             "Pressione PGA Oracle alta: eseguire check_memory_pressure per identificare le sessioni "
@@ -691,6 +734,10 @@ def diagnose_os_pressure(env: str, host: str, inst: str,
             "swap_used_pct": round(swap_used_pct, 1),
             "page_out_per_sec_avg": round(page_out_avg, 1),
             "disk_io_await_p95_ms": round(disk_io_await_max, 1),
+            "net_rx_errors": net_rx_errors_total,
+            "net_tx_errors": net_tx_errors_total,
+            "net_rx_drops": net_rx_drops_total,
+            "net_tx_drops": net_tx_drops_total,
         },
         "pressione_oracle_detail": {
             "livello": livello_pressione_oracle,
@@ -703,6 +750,7 @@ def diagnose_os_pressure(env: str, host: str, inst: str,
         {"sezione": "os_cpu_stats",          "result": res["cpu"]},
         {"sezione": "os_memory_stats",        "result": res["memory"]},
         {"sezione": "os_disk_stats",          "result": res["disk"]},
+        {"sezione": "os_network_stats",       "result": res["network"]},
         {"sezione": "check_memory_pressure",  "result": mem_pressure},
         {"sezione": "check_resource_limits",  "result": res["resources"]},
         {"sezione": "sessions_by_user",       "result": res["sessions"]},
