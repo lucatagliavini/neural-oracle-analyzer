@@ -12,16 +12,16 @@ This file provides guidance to agents when working with code in this repository.
 3. Solo se necessario per la milestone da avviare: leggere il file specs rilevante in [`docs/specs/`](docs/specs/).
 4. Non scrivere codice prima di aver completato i passi 1–2.
 
-**Ultimo file di sessione**: [`docs/sessions/2026-09-08.md`](docs/sessions/2026-09-08.md)
-— Stato: M0–M10 ✅ completate | OS monitoring implementato
-— 25 tool MCP attivi su `lxprworkerlana01:8420` | 51 test --quick bash
-— Nuovi tool: os_cpu_stats, os_memory_stats, os_disk_stats, diagnose_os_pressure
-— Nuova lib: lib/os_cmd.sh (os_detect, os_check_cmd, os_sample) cross-platform AIX/Linux
+**Ultimo file di sessione**: [`docs/sessions/2026-09-09.md`](docs/sessions/2026-09-09.md)
+— Stato: M0–M11 ✅ completate | OS monitoring completo (cpu, mem, disk, network)
+— 26 tool MCP attivi su `lxprworkerlana01:8420` | 53 test --quick bash
+— M11: os_network_stats (AIX netstat -i, Linux /proc/net/dev) + integrazione diagnose_os_pressure
+— Gotcha 30-32: apostrofi awk, netstat -I AIX, dedup righe netstat -i per iface
 — Proxy HTTP attivo su porta 80 (SSL placeholder commentato)
 
 ## Project state
 
-M0–M10 completate. 21 tool primitivi bash + 4 Python orchestrati attivi su `lxprworkerlana01:8420`. 51 test --quick bash. M10: 3 nuovi tool OS (os_cpu_stats, os_memory_stats, os_disk_stats) + orchestrato diagnose_os_pressure + lib/os_cmd.sh cross-platform AIX/Linux. Proxy HTTP attivo su porta 80 con ProxyTimeout 300.
+M0–M11 completate. 22 tool primitivi bash + 4 Python orchestrati attivi su `lxprworkerlana01:8420`. 53 test --quick bash. OS monitoring completo: os_cpu_stats, os_memory_stats, os_disk_stats, os_network_stats + orchestrato diagnose_os_pressure + lib/os_cmd.sh cross-platform AIX/Linux. Proxy HTTP attivo su porta 80 con ProxyTimeout 300.
 `docs/specs/` è la fonte autoritativa — leggerla prima di scrivere codice.
 
 ## Goal
@@ -108,6 +108,9 @@ Fixture in `tests/fixtures/<tool>.ok.json` con header `#ENV=` `#HOST=` `#INST=` 
 27. **`print` vs `printf` in awk inline**: `print "["` aggiunge `\n` — se il JSON viene poi concatenato in bash, il newline invalida il parsing. Usare `printf "["` e `printf "]"` per output JSON in awk.
 28. **`svmon -G -O unit=byte` non disponibile su AIX < 7.2**: usare `svmon -G` (output in pagine) e moltiplicare per la page size (rilevata dalla riga `s N KB` dell'output; default 4KB).
 29. **`df -k` AIX**: colonne diverse da Linux — `$2=1024-blocks(KB) $3=Free(KB) $4=%Used $NF=MountPoint`. Heuristica di rilevamento: se `$5 ~ /%/` → Linux, altrimenti AIX.
+30. **Apostrofi nei commenti awk inline**: il programma awk in `'...'` single-quote bash termina se il commento contiene un apostrofo (`c'è`, `quell'iface`). Tutti i commenti dentro `awk '...'` devono evitare apostrofi.
+31. **`netstat -I` AIX richiede nome iface**: su AIX `-I` è un flag che accetta il nome interfaccia (es. `netstat -I en0`), non combinabile come flag autonomo. Per elencare tutte le iface usare `netstat -i`.
+32. **`netstat -i` AIX duplica ogni iface**: ogni iface compare una riga per ogni indirizzo (link#, IP, alias) con contatori identici. Per evitare duplicati nel parser awk: prendere solo la riga con `$3 ~ /link#/`.
 
 ## NFS path structure
 
