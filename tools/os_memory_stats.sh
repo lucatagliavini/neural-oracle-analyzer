@@ -398,5 +398,5 @@ function percentile(arr, n, p,    idx, frac, lo, hi) {
 
 esac
 
-build_envelope "$TOOL" "$ENV" "$HOST" "null" "null" "ok" "$JSON" "null"
+build_envelope "$TOOL" "$ENV" "$HOST" "null" "null" "ok" "[$JSON]" "null"
 exit 0

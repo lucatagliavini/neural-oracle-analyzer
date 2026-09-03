@@ -1,0 +1,8 @@
+#ENV=TEST
+#HOST=axnporadb41
+# Nessun #INST= — os_disk_stats accetta solo ENV HOST (tool OS-level, instance_name=null)
+# Tool: df -k + iostat via SSH — filesystem usage, I/O throughput
+# Atteso: status=ok, data={os_type, filesystems[], io_samples[], io_available, summary{io:{}}}
+# OS target: AIX (axnporadb41) — 19 filesystem inclusi /np41cdbN/data e /np41cdbN/home
+#ARGS=--samples=3
+#ARGS=--interval=1

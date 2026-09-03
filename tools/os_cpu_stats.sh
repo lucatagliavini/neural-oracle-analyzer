@@ -260,5 +260,5 @@ function percentile(arr, n, p,    idx, frac, lo, hi) {
 }
 ')
 
-build_envelope "$TOOL" "$ENV" "$HOST" "null" "null" "ok" "$JSON" "null"
+build_envelope "$TOOL" "$ENV" "$HOST" "null" "null" "ok" "[$JSON]" "null"
 exit 0

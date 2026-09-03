@@ -1,0 +1,8 @@
+#ENV=TEST
+#HOST=axnporadb41
+# Nessun #INST= — os_cpu_stats accetta solo ENV HOST (tool OS-level, instance_name=null)
+# Tool: vmstat via SSH — CPU user/sys/idle/wait%, run queue
+# Atteso: status=ok, data={os_type, cpu_count, samples[], summary{cpu_user_pct, cpu_sys_pct, cpu_idle_pct, cpu_wait_pct, run_queue}}
+# OS target: AIX (axnporadb41)
+#ARGS=--samples=3
+#ARGS=--interval=1

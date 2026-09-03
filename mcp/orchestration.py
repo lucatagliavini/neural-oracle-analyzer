@@ -487,7 +487,8 @@ def diagnose_os_pressure(env: str, host: str, inst: str,
     cpu_count = 0
     os_type = "unknown"
     if _ok(res["cpu"]):
-        cpu_data = res["cpu"].get("data", {})
+        cpu_data_list = res["cpu"].get("data", [])
+        cpu_data = cpu_data_list[0] if isinstance(cpu_data_list, list) and cpu_data_list else {}
         if isinstance(cpu_data, dict):
             cpu_summary = cpu_data.get("summary", {})
             cpu_count = cpu_data.get("cpu_count", 0) or 0
@@ -507,7 +508,8 @@ def diagnose_os_pressure(env: str, host: str, inst: str,
     ram_free_pct = 100.0
     page_out_avg = 0.0
     if _ok(res["memory"]):
-        mem_data = res["memory"].get("data", {})
+        mem_data_list = res["memory"].get("data", [])
+        mem_data = mem_data_list[0] if isinstance(mem_data_list, list) and mem_data_list else {}
         if isinstance(mem_data, dict):
             mem_summary = mem_data.get("summary", {})
             samples_list = mem_data.get("samples", [])
@@ -528,7 +530,8 @@ def diagnose_os_pressure(env: str, host: str, inst: str,
     disk_io_await_max = 0.0
     disk_data = {}
     if _ok(res["disk"]):
-        disk_data = res["disk"].get("data", {})
+        disk_data_list = res["disk"].get("data", [])
+        disk_data = disk_data_list[0] if isinstance(disk_data_list, list) and disk_data_list else {}
         if isinstance(disk_data, dict):
             disk_summary = disk_data.get("summary", {}).get("io", {})
             for dev_stats in disk_summary.values():

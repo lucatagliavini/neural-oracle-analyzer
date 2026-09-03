@@ -1,0 +1,8 @@
+#ENV=TEST
+#HOST=axnporadb41
+# Nessun #INST= — os_memory_stats accetta solo ENV HOST (tool OS-level, instance_name=null)
+# Tool: svmon -G + lsps -s + vmstat via SSH — RAM/swap usage, page in/out
+# Atteso: status=ok, data={os_type, samples[], summary{ram_used_bytes, swap_used_bytes, page_in_per_sec, page_out_per_sec}}
+# OS target: AIX (axnporadb41) — RAM ~252GB, swap ~16GB
+#ARGS=--samples=3
+#ARGS=--interval=1

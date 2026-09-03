@@ -340,5 +340,5 @@ fi
 JSON=$(printf '{"os_type":"%s","filesystems":%s,"io_samples":%s,"io_available":%s,"summary":{"io":%s}}' \
     "$OS_TYPE" "$FS_JSON" "$IO_JSON" "$IO_AVAILABLE" "$SUMMARY_IO")
 
-build_envelope "$TOOL" "$ENV" "$HOST" "null" "null" "ok" "$JSON" "null"
+build_envelope "$TOOL" "$ENV" "$HOST" "null" "null" "ok" "[$JSON]" "null"
 exit 0
