@@ -404,10 +404,13 @@ MCP_TOOLS: list[dict] = [
     {
         "name": "list_known_hosts",
         "description": (
-            "INVENTARIO — Elenca gli host Oracle fisici noti dal mount NFS locale su lxprworkerlana01. "
+            "INVENTARIO — Punto di partenza quando non si conosce l'hostname. "
+            "Elenca gli host Oracle fisici noti dal mount NFS locale su lxprworkerlana01. "
             "Non verifica se gli host sono raggiungibili o accesi: restituisce ciò che è configurato. "
-            "ENVIRONMENT determina il tier: PROD → host prod, tutti gli altri → noprod. "
-            "Usare come primo passo per scoprire quali hostname esistono da passare agli altri tool."
+            "ENVIRONMENT determina il tier: PROD → host prod, tutti gli altri (TEST/EURO/CERT/INTE/COLL) → noprod. "
+            "Restituisce: array di {hostname}. "
+            "Passo successivo: list_known_instances(hostname) per sapere le istanze, "
+            "o list_all_instances_status(hostname) per sapere quali sono accese."
         ),
         "inputSchema": {
             "type": "object",
@@ -418,11 +421,13 @@ MCP_TOOLS: list[dict] = [
     {
         "name": "list_known_instances",
         "description": (
-            "INVENTARIO — Elenca le istanze Oracle configurate su un host leggendo il mount NFS, "
-            "senza SSH né sqlplus. NON indica se le istanze sono accese o spente. "
-            "Funziona anche se l'host Oracle è irraggiungibile. "
-            "Usare per sapere quali istanze esistono (inventario); "
-            "per sapere quali sono accese usare list_all_instances_status."
+            "INVENTARIO — Elenca le istanze Oracle (CDB) configurate su un host, "
+            "leggendo il mount NFS senza SSH né sqlplus. "
+            "NON indica se le istanze sono accese o spente: restituisce solo l'inventario configurato. "
+            "Funziona anche se l'host Oracle è spento o irraggiungibile. "
+            "Restituisce: array di {instance_name}. "
+            "Usare quando si conosce l'hostname ma non il nome dell'istanza. "
+            "Per sapere quali istanze sono operative in questo momento usare list_all_instances_status."
         ),
         "inputSchema": {
             "type": "object",
@@ -433,10 +438,12 @@ MCP_TOOLS: list[dict] = [
     {
         "name": "list_all_hosts_and_instances",
         "description": (
-            "INVENTARIO — Inventario completo di tutti gli host Oracle e le istanze configurate "
-            "in una sola chiamata, leggendo il mount NFS locale. Zero SSH, zero sqlplus. "
-            "NON indica se le istanze sono accese o spente. "
-            "Usare per una visione globale dell'infrastruttura configurata."
+            "INVENTARIO — Visione completa dell'intera infrastruttura Oracle in una chiamata sola: "
+            "tutti gli host con tutte le istanze configurate, letto dal mount NFS locale. "
+            "Zero SSH, zero sqlplus. NON indica se le istanze sono accese o spente. "
+            "Restituisce: array di {hostname, instances:[{instance_name}]}. "
+            "Usare quando non si sa né l'hostname né l'istanza e si vuole esplorare tutto. "
+            "Alternativa più veloce a chiamare list_known_hosts + list_known_instances in sequenza."
         ),
         "inputSchema": {
             "type": "object",
@@ -448,12 +455,13 @@ MCP_TOOLS: list[dict] = [
     {
         "name": "list_all_instances_status",
         "description": (
-            "STATO OPERATIVO — Verifica in tempo reale lo stato di tutte le istanze Oracle "
-            "di un host interrogando Oracle in parallelo (identify_instance su ciascuna). "
+            "STATO OPERATIVO — Risponde a 'quali istanze sono accese su questo host?'. "
+            "Interroga Oracle in parallelo su tutte le istanze configurate dell'host. "
             "Restituisce per ogni istanza: oracle_version, status (OPEN/MOUNTED/null), "
             "database_status, instance_role, startup_time. "
-            "status=null significa che l'istanza è spenta o irraggiungibile. "
-            "Usare quando la domanda è 'quali istanze sono accese/attive su un host'."
+            "status=null → istanza spenta o irraggiungibile. "
+            "Usare questo prima di identify_instance quando non si sa quale istanza è attiva. "
+            "NON usare se si conosce già l'instance_name: preferire identify_instance (più veloce)."
         ),
         "inputSchema": {
             "type": "object",
@@ -464,10 +472,13 @@ MCP_TOOLS: list[dict] = [
     {
         "name": "list_instances_on_host",
         "description": (
-            "INVENTARIO VIA SSH — Elenca le istanze Oracle configurate su un host "
-            "leggendo gli env file Oracle via SSH. NON indica se le istanze sono accese o spente. "
-            "Preferire list_known_instances (più veloce, no SSH) salvo necessità di dati aggiornati via SSH. "
-            "Usare list_all_instances_status per sapere quali istanze sono operative."
+            "INVENTARIO VIA SSH — Alternativa a list_known_instances che legge direttamente "
+            "gli env file Oracle via SSH invece del mount NFS. "
+            "NON indica se le istanze sono accese o spente. "
+            "Preferire list_known_instances (più veloce, no SSH) in quasi tutti i casi. "
+            "Usare questo solo se list_known_instances restituisce dati incompleti o errati "
+            "(es. mount NFS non aggiornato). "
+            "Per lo stato operativo usare list_all_instances_status."
         ),
         "inputSchema": {
             "type": "object",
@@ -478,10 +489,12 @@ MCP_TOOLS: list[dict] = [
     {
         "name": "identify_instance",
         "description": (
-            "STATO OPERATIVO — Interroga Oracle (v$instance) per una singola istanza. "
-            "Restituisce versione, stato (OPEN/MOUNTED), ruolo, startup time. "
+            "STATO OPERATIVO — Interroga Oracle (v$instance) per una singola istanza di cui si conosce il nome. "
+            "Restituisce: instance_name, host_name, oracle_version, status (OPEN/MOUNTED), "
+            "database_status, instance_role, startup_time. "
             "Fallisce con connection_failed se l'istanza è spenta o irraggiungibile. "
-            "Per verificare più istanze contemporaneamente usare list_all_instances_status."
+            "Se non si conosce il nome dell'istanza usare list_known_instances prima. "
+            "Per verificare più istanze in parallelo usare list_all_instances_status."
         ),
         "inputSchema": {
             "type": "object",
@@ -506,10 +519,11 @@ MCP_TOOLS: list[dict] = [
     {
         "name": "get_alert_log_info",
         "description": (
-            "METADATI LOG — Restituisce path, size_bytes, last_modified e age_hours "
-            "dell'alert log Oracle leggendo solo il filesystem NFS, senza aprire il file. "
-            "Risposta istantanea. "
-            "Usare prima di scan_alert_log per verificare se il log è aggiornato e stimarne il tempo di scansione."
+            "METADATI LOG — Restituisce path, size_bytes, last_modified, age_hours dell'alert log "
+            "leggendo solo il filesystem NFS senza aprire il file. Risposta istantanea (<1s). "
+            "Usare come controllo preliminare prima di scan_alert_log: "
+            "se age_hours è elevato il log potrebbe non essere aggiornato; "
+            "se size_bytes è molto grande scan_alert_log impiegherà più tempo."
         ),
         "inputSchema": {
             "type": "object",
@@ -557,8 +571,11 @@ MCP_TOOLS: list[dict] = [
     {
         "name": "get_diag_home",
         "description": (
-            "DIAGNOSTICA — Restituisce il percorso DIAGNOSTIC_DEST dell'istanza Oracle. "
-            "Usare per costruire dinamicamente path di diagnostica non coperti dal mount NFS."
+            "DIAGNOSTICA — Restituisce il percorso DIAGNOSTIC_DEST dell'istanza Oracle "
+            "(es. /u01/app/oracle/diag/rdbms/np41cdb0/NP41CDB0). "
+            "Utile per costruire manualmente path di file di trace o dump "
+            "quando il mount NFS non è disponibile o non copre quel path. "
+            "In condizioni normali preferire get_alert_log_info per l'alert log."
         ),
         "inputSchema": {
             "type": "object",
@@ -668,10 +685,13 @@ MCP_TOOLS: list[dict] = [
     {
         "name": "os_cpu_stats",
         "description": (
-            "OS MONITORING — Raccoglie metriche CPU e run queue dal server via vmstat (AIX e Linux). "
-            "Campionamento multiplo con statistiche aggregate min/max/avg/p95/p99. "
-            "Parametri opzionali: samples (default 5), interval (default 2s). "
-            "Firma: ENV HOSTNAME — nessun INSTANCE_NAME (tool OS-level)."
+            "OS MONITORING — Metriche CPU del server OS (non di Oracle): "
+            "cpu_user_pct, cpu_sys_pct, cpu_idle_pct, cpu_wait_pct, run_queue per campione, "
+            "più statistiche aggregate min/max/avg/p95/p99. "
+            "Funziona su AIX e Linux via SSH. "
+            "Non richiede instance_name: opera a livello OS, non Oracle. "
+            "cpu_wait_pct alto (>20%) indica attesa I/O; run_queue > cpu_count indica saturazione CPU. "
+            "Per analisi correlata OS+Oracle usare diagnose_os_pressure."
         ),
         "inputSchema": {
             "type": "object",
@@ -686,9 +706,13 @@ MCP_TOOLS: list[dict] = [
     {
         "name": "os_memory_stats",
         "description": (
-            "OS MONITORING — Raccoglie metriche RAM e swap dal server (svmon+lsps su AIX, free su Linux). "
-            "Include page in/out da vmstat. Campionamento multiplo con statistiche aggregate. "
-            "Parametri opzionali: samples (default 5), interval (default 2s)."
+            "OS MONITORING — Metriche RAM e swap del server OS: "
+            "ram_total_bytes, ram_used_bytes, ram_free_bytes, swap_total_bytes, swap_used_bytes, "
+            "page_in_per_sec, page_out_per_sec per campione, più statistiche aggregate. "
+            "AIX: usa svmon -G + lsps -s. Linux: usa free -b. "
+            "Non richiede instance_name: opera a livello OS. "
+            "swap_used > 50% o page_out > 0 indicano pressione sulla memoria. "
+            "Per analisi correlata OS+Oracle usare diagnose_os_pressure."
         ),
         "inputSchema": {
             "type": "object",
@@ -703,9 +727,13 @@ MCP_TOOLS: list[dict] = [
     {
         "name": "os_disk_stats",
         "description": (
-            "OS MONITORING — Raccoglie utilizzo filesystem (df) e I/O disco (iostat) dal server. "
-            "Se iostat non disponibile: io_samples=[], io_available=false (nessun errore). "
-            "Parametri opzionali: samples (default 5), interval (default 2s), fs (mount point)."
+            "OS MONITORING — Utilizzo filesystem e I/O disco del server OS. "
+            "filesystems: mount_point, total_bytes, used_bytes, free_bytes, use_pct per ogni filesystem. "
+            "io_samples: reads/writes per secondo, kB/s, await_ms per device (da iostat se disponibile). "
+            "Non richiede instance_name: opera a livello OS. "
+            "Parametro fs opzionale per filtrare un mount point specifico (es. /oracle/data). "
+            "Se iostat non è installato: io_samples=[], io_available=false, nessun errore. "
+            "Per analisi correlata OS+Oracle usare diagnose_os_pressure."
         ),
         "inputSchema": {
             "type": "object",
@@ -722,11 +750,14 @@ MCP_TOOLS: list[dict] = [
     {
         "name": "diagnose_instance",
         "description": (
-            "RUNBOOK — Discovery completa di una istanza Oracle in una chiamata sola. "
-            "Esegue in parallelo: identify_instance, list_pdbs, check_fra_usage, check_resource_limits. "
-            "Restituisce un summary interpretato (stato, PDB aperti, criticità FRA/risorse) "
-            "e i risultati raw di ogni primitivo nei details. "
-            "Usare come punto di partenza per qualsiasi analisi su un'istanza."
+            "RUNBOOK — Punto di partenza per qualsiasi analisi su una istanza Oracle. "
+            "In una chiamata sola esegue in parallelo: identify_instance, list_pdbs, "
+            "check_fra_usage, check_resource_limits. "
+            "Restituisce summary.stato_generale, lista PDB aperti/chiusi, "
+            "eventuali criticità su FRA (spazio) e limiti di risorsa (sessioni/processi), "
+            "più i risultati raw di ogni primitivo. "
+            "Usare sempre come primo passo quando si analizza un'istanza di cui non si sa lo stato. "
+            "Se si sospetta già un problema specifico (es. ORA-04030) usare il runbook dedicato."
         ),
         "inputSchema": {
             "type": "object",
@@ -737,11 +768,12 @@ MCP_TOOLS: list[dict] = [
     {
         "name": "check_memory_pressure",
         "description": (
-            "RUNBOOK — Analisi pressione memoria/PGA su una istanza Oracle. "
+            "RUNBOOK — Analisi pressione memoria Oracle (PGA). "
             "Esegue: top_pga_sessions, pga_by_pdb_session, pga_sga_by_pdb. "
-            "Restituisce un summary con livello di pressione (bassa/media/alta), "
-            "sessione top e distribuzione PGA per PDB. "
-            "Usare quando si sospetta consumo eccessivo di memoria di processo."
+            "Restituisce: livello_pressione (bassa/media/alta), sessione con più PGA, "
+            "distribuzione PGA per PDB, valutazione testuale. "
+            "Usare quando si sospetta ORA-04030, query lente per sort su disco, "
+            "o consumo anomalo di memoria nei processi Oracle."
         ),
         "inputSchema": {
             "type": "object",
@@ -752,11 +784,13 @@ MCP_TOOLS: list[dict] = [
     {
         "name": "runbook_ora04030",
         "description": (
-            "RUNBOOK — Diagnosi completa per errore ORA-04030 (out of process memory). "
-            "Esegue: scan_alert_log (filtra ORA-04030), check_memory_pressure, get_alert_log_info. "
-            "Restituisce presenza/frequenza dell'errore, pressione memoria attuale e raccomandazioni. "
-            "Filtri opzionali: since (YYYY-MM-DD), pdb. "
-            "Usare quando viene segnalato o rilevato un ORA-04030."
+            "RUNBOOK — Diagnosi completa per ORA-04030 'out of process memory'. "
+            "Esegue: scan_alert_log (filtra ORA-04030) + check_memory_pressure + get_alert_log_info. "
+            "Restituisce: se l'errore è presente nell'alert log, quante volte, in quali PDB, "
+            "ultimo evento, livello pressione PGA attuale, raccomandazioni operative. "
+            "Usare quando l'utente segnala ORA-04030, processi Oracle che terminano per memoria, "
+            "o query che falliscono con errori di allocazione. "
+            "Filtro since utile per circoscrivere a un incidente specifico (es. since='2026-09-01')."
         ),
         "inputSchema": {
             "type": "object",
@@ -771,12 +805,17 @@ MCP_TOOLS: list[dict] = [
     {
         "name": "diagnose_os_pressure",
         "description": (
-            "RUNBOOK — Analisi pressione OS correlata con stato Oracle in una chiamata sola. "
+            "RUNBOOK — Analisi pressione a livello server (OS + Oracle) in una chiamata sola. "
             "Esegue in parallelo: os_cpu_stats, os_memory_stats, os_disk_stats, "
             "check_memory_pressure, check_resource_limits, sessions_by_user. "
-            "Restituisce livello_pressione_os (bassa/media/alta), livello_pressione_oracle, "
-            "correlazioni cross-domain e raccomandazioni. "
-            "Usare quando si sospetta che il server stia soffrendo a livello OS."
+            "Restituisce: livello_pressione_os (bassa/media/alta), livello_pressione_oracle, "
+            "metriche_os (cpu_wait%, run_queue, ram_free%, swap_used%, page_out/s, disk_await), "
+            "correlazioni (es. 'CPU wait alto + PGA elevata → I/O da sort su disco'), "
+            "raccomandazioni prioritizzate. "
+            "Impiega circa 10-30s (campionamento OS). "
+            "Usare quando il server è lento, le query sono degradate, o si sospetta un problema "
+            "di CPU/memoria/disco che impatta Oracle. "
+            "NON usare per problemi puramente Oracle (es. ORA-04030): usare runbook_ora04030."
         ),
         "inputSchema": {
             "type": "object",
