@@ -182,10 +182,13 @@ build_envelope() {
 
 # --- Parsing CSV → array JSON -------------------------------------------------
 
-# Converte output CSV di sqlplus (SET MARKUP CSV ON) in array JSON.
+# Converte output CSV di sqlplus (SET COLSEP "," + SET HEADING ON) in array JSON.
 # Legge da stdin, stampa su stdout.
-# Prima riga = header con nomi colonne (quoted), righe successive = dati.
-# Valori NULL (campo vuoto) → null JSON. Valori numerici non quotati → numero JSON.
+# Prima riga = header con nomi colonne, righe successive = dati.
+# Compatibile con Oracle 11g, 12.1, 12.2, 19c (non richiede SET MARKUP CSV ON).
+# - Valori vuoti dopo trim → null JSON
+# - Valori numerici puri → numero JSON
+# - Tutto il resto → stringa JSON
 _csv_to_json_array() {
     awk '
 BEGIN {
@@ -198,6 +201,7 @@ NR == 1 {
     next
 }
 /^[[:space:]]*$/ { next }
+/^[-,[:space:]]+$/ { next }
 {
     split_csv($0, values)
     if (!first_data) printf ","
@@ -205,24 +209,28 @@ NR == 1 {
     printf "{"
     for (i = 1; i <= ncols; i++) {
         if (i > 1) printf ","
-        key = tolower(unquote(headers[i]))
+        key = tolower(trim(unquote(headers[i])))
         gsub(/ /, "_", key)   # normalizza spazi in underscore (es. "open mode" → "open_mode")
-        val = values[i]
-        if (substr(val,1,1) == "\"") {
-            inner = substr(val, 2, length(val)-2)
-            gsub(/\\/, "\\\\", inner)
-            gsub(/"/, "\\\"", inner)
-            printf "\"%s\":\"%s\"", key, inner
-        } else if (val == "" || val == " ") {
+        val = trim(unquote(values[i]))
+        if (val == "") {
             printf "\"%s\":null", key
-        } else {
+        } else if (val ~ /^-?[0-9]+(\.[0-9]+)?$/) {
             printf "\"%s\":%s", key, val
+        } else {
+            gsub(/\\/, "\\\\", val)
+            gsub(/"/, "\\\"", val)
+            printf "\"%s\":\"%s\"", key, val
         }
     }
     print "}"
 }
 END {
     print "]"
+}
+function trim(s) {
+    sub(/^[[:space:]]+/, "", s)
+    sub(/[[:space:]]+$/, "", s)
+    return s
 }
 function unquote(s) {
     if (substr(s,1,1) == "\"" && substr(s,length(s),1) == "\"")
@@ -343,16 +351,18 @@ run_sqlplus_query() {
 
     local sql_block
     sql_block=$(printf \
-'SET MARKUP CSV ON
+'SET COLSEP ","
 SET FEEDBACK OFF
 SET HEADING OFF
 SET PAGESIZE 0
+SET LINESIZE 32767
 SET TRIMSPOOL ON
 WHENEVER SQLERROR EXIT 1
 select version from v$instance;
 PROMPT ORAMARKER
 
 SET HEADING ON
+SET PAGESIZE 9999
 %s;
 EXIT
 ' "$query")

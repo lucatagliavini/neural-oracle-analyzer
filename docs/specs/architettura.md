@@ -134,8 +134,27 @@ Ogni tool richiama questa libreria e si occupa solo della query specifica e dell
 | Memoria/PGA | `pga_sga_by_pdb.sh` | `v$rsrcpdbmetric` + `cdb_pdbs` (richiede Resource Manager PDB plan attivo) |
 | Memoria/PGA | `pga_by_pdb_session.sh` | join `v$session`/`v$process`/`cdb_pdbs` |
 | Memoria/PGA | `top_pga_sessions.sh` | `v$process` + `v$session` ordinato per PGA |
+| OS Monitoring | `os_cpu_stats.sh` | `vmstat` via SSH — CPU user/sys/idle/wait%, run queue; AIX e Linux |
+| OS Monitoring | `os_memory_stats.sh` | `svmon -G`+`lsps -s` (AIX) o `free -b` (Linux) + `vmstat` per page in/out |
+| OS Monitoring | `os_disk_stats.sh` | `df -k` (filesystem) + `iostat` (I/O) via SSH; `--fs=` per filtro mount point |
 
-Fuori perimetro per lo step attuale: analisi grafici OEM, access plan, wait event, uso CPU/I/O da OEM.
+Fuori perimetro per lo step attuale: analisi grafici OEM, access plan, wait event, uso CPU/I/O da OEM. Tool di rete OS (`os_network_stats.sh`) in BACKLOG secondo round.
+
+## Libreria OS (`lib/os_cmd.sh`)
+
+Libreria bash cross-platform per i tool OS-level. Fornisce:
+
+- **`os_detect HOST`** — rileva il sistema operativo via SSH (`uname -s`), restituisce `aix`/`linux`/`unknown`. Timeout 5s.
+- **`os_check_cmd HOST CMD`** — verifica disponibilità di un comando sul target (`which CMD`), restituisce `available`/`missing`.
+- **`os_sample HOST SAMPLES INTERVAL CMD_AIX CMD_LINUX`** — campiona un comando N volte con INTERVAL secondi di pausa, raccogliendo stdout con separatore `\001` (SOH) tra campioni.
+  - Se `SAMPLES × INTERVAL > OS_MAX_SAMPLE_DURATION` (default 30s) riduce SAMPLES automaticamente.
+  - Se SSH fallisce: restituisce exit 1 + diagnostica su stderr.
+
+**Principio cross-platform**: i comandi (`vmstat`, `free`, `svmon`, `df`, `iostat`) girano sul target remoto via SSH. Il parsing gira sull'host MCP (ppc64le RHEL) — awk POSIX per coerenza. I due rami AIX/Linux sono gestiti come branch espliciti nei tool, non come astrazione generica.
+
+**Firma CLI dei tool OS**: `ENV HOSTNAME [--samples=N] [--interval=S]` — **nessun `INSTANCE_NAME`** (tool OS-level). La validazione è manuale (no `validate_args` che richiede 3 argomenti).
+
+**Errore `command_not_available`**: restituito se un comando richiesto non è presente sul target (es. `svmon` non installato su AIX). Context: `{command, os}`. Vedi `contratto-json.md` per la tabella codici.
 
 ## Versioni Oracle target
 

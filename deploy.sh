@@ -22,7 +22,7 @@ if [ "${1:-}" = "--dry-run" ]; then
     echo "[dry-run] Simulazione deploy — nessun file verrà copiato"
 fi
 
-RSYNC_OPTS="-av --checksum"
+RSYNC_OPTS="-av --checksum --perms"
 if [ $DRY_RUN -eq 1 ]; then
     RSYNC_OPTS="$RSYNC_OPTS --dry-run"
 fi
@@ -67,6 +67,11 @@ rsync $RSYNC_OPTS "${EXCLUDES[@]}" \
     "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}/"
 
 if [ $DRY_RUN -eq 0 ]; then
+    # Rendi eseguibili gli script bash in locale
+    find "${SCRIPT_DIR}/lib" "${SCRIPT_DIR}/tools" "${SCRIPT_DIR}/tests" \
+         -name '*.sh' -exec chmod 755 {} \; 2>/dev/null
+    chmod 755 "${SCRIPT_DIR}/deploy.sh" 2>/dev/null || true
+
     # Rendi eseguibili gli script bash sul server
     ssh "${REMOTE_USER}@${REMOTE_HOST}" \
         "find ${REMOTE_DIR}/lib ${REMOTE_DIR}/tools ${REMOTE_DIR}/tests \

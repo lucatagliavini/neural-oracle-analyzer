@@ -53,6 +53,7 @@ Codici standard (lista chiusa; aggiunte solo via update di questa spec):
 | `query_failed` | ORA-xxxx durante l'esecuzione della query | `ora_error` |
 | `unsupported_version` | feature non disponibile sulla versione del target | `required`, `actual` |
 | `log_not_found` | path alert log assente sul mount NFS | `path` |
+| `command_not_available` | comando OS richiesto non presente sul target | `command`, `os` |
 
 In caso di errore, `data` è `[]` e `status` è `"error"`. Nessun fallback automatico: è l'operatore/orchestratore a decidere il passo successivo.
 
@@ -128,4 +129,64 @@ Filtri opzionali (aggiuntivi rispetto a `--code=` e `--since=`):
 { "status": "error", "data": [],
   "error": { "code": "log_not_found", "message": "path non esistente o non raggiungibile sul mount NFS",
              "context": { "path": "/unipol/logs/database/oracle/noprod/axnporadb41/np41cdbX/NP41CDBX/trace/alert_NP41CDBX.log" } } }
+```
+
+### Tool OS (`os_cpu_stats`, `os_memory_stats`, `os_disk_stats`) — note sul contratto
+
+- `instance_name`: sempre `null` — i tool OS non operano a livello di istanza Oracle.
+- `oracle_version`: sempre `null` — non applicabile.
+- `os_type`: `"aix"` o `"linux"` — rilevato da `uname -s` tramite `lib/os_cmd.sh`.
+- Il campo `data` contiene due chiavi di primo livello: `samples` (array campioni) e `summary` (statistiche aggregate min/max/avg/p95/p99).
+- Firma CLI: `TOOL ENV HOSTNAME [--samples=N] [--interval=S]` — nessun `INSTANCE_NAME`.
+
+### `os_cpu_stats.sh` — ok
+
+```json
+{
+  "tool": "os_cpu_stats", "environment": "PROD", "hostname": "axproradb01",
+  "instance_name": null, "oracle_version": null, "status": "ok",
+  "data": {
+    "os_type": "aix",
+    "cpu_count": 16,
+    "samples": [
+      { "ts": "2026-09-07T10:00:01+02:00", "cpu_user_pct": 12, "cpu_sys_pct": 5,
+        "cpu_idle_pct": 78, "cpu_wait_pct": 5, "run_queue": 2 }
+    ],
+    "summary": {
+      "cpu_user_pct": { "min": 10, "max": 15, "avg": 12.2, "p95": 14.5, "p99": 15 },
+      "cpu_sys_pct":  { "min": 4,  "max": 7,  "avg": 5.4,  "p95": 6.8,  "p99": 7  },
+      "cpu_idle_pct": { "min": 73, "max": 81, "avg": 77.8, "p95": 80.5, "p99": 81 },
+      "cpu_wait_pct": { "min": 3,  "max": 8,  "avg": 4.6,  "p95": 7.0,  "p99": 8  },
+      "run_queue":    { "min": 1,  "max": 4,  "avg": 2.1,  "p95": 3.8,  "p99": 4  }
+    }
+  },
+  "error": null
+}
+```
+
+### `os_cpu_stats.sh` — errore comando mancante
+
+```json
+{ "status": "error", "data": [],
+  "error": { "code": "command_not_available", "message": "vmstat non trovato sul target",
+             "context": { "command": "vmstat", "os": "aix" } } }
+```
+
+### `os_memory_stats.sh` — ok (forma `data`)
+
+```json
+"data": {
+  "os_type": "linux",
+  "samples": [
+    { "ts": "...", "ram_total_bytes": 137438953472, "ram_used_bytes": 98765432100,
+      "ram_free_bytes": 38673521372, "swap_total_bytes": 8589934592,
+      "swap_used_bytes": 1073741824, "page_in_per_sec": 0, "page_out_per_sec": 0 }
+  ],
+  "summary": {
+    "ram_used_bytes":    { "min": 98000000000, "max": 99000000000, "avg": 98500000000, "p95": 98900000000, "p99": 99000000000 },
+    "swap_used_bytes":   { "min": 1073741824,  "max": 1073741824,  "avg": 1073741824,  "p95": 1073741824,  "p99": 1073741824  },
+    "page_in_per_sec":   { "min": 0, "max": 2, "avg": 0.4, "p95": 1.9, "p99": 2 },
+    "page_out_per_sec":  { "min": 0, "max": 1, "avg": 0.2, "p95": 0.9, "p99": 1 }
+  }
+}
 ```

@@ -32,7 +32,7 @@ from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
 import config
-from orchestration import diagnose_instance, check_memory_pressure, runbook_ora04030
+from orchestration import diagnose_instance, check_memory_pressure, runbook_ora04030, diagnose_os_pressure
 from runner import run_primitive_tool
 
 # Semaforo globale che limita il numero di tools/call concorrenti.
@@ -289,6 +289,36 @@ TOOL_CATALOG: list[dict] = [
         ),
         "params": ["environment", "hostname", "instance_name", "limit?"],
     },
+    # --- OS Monitoring ---
+    {
+        "name": "os_cpu_stats",
+        "description": (
+            "OS MONITORING — Raccoglie metriche CPU e run queue dal server via vmstat (AIX e Linux). "
+            "Campionamento multiplo con statistiche aggregate min/max/avg/p95/p99. "
+            "Parametri opzionali: samples (default 5), interval (default 2s). "
+            "Firma: ENV HOSTNAME — nessun INSTANCE_NAME (tool OS-level)."
+        ),
+        "params": ["environment", "hostname", "samples?", "interval?"],
+    },
+    {
+        "name": "os_memory_stats",
+        "description": (
+            "OS MONITORING — Raccoglie metriche RAM e swap dal server (svmon+lsps su AIX, free su Linux). "
+            "Include page in/out da vmstat. Campionamento multiplo con statistiche aggregate. "
+            "Parametri opzionali: samples (default 5), interval (default 2s)."
+        ),
+        "params": ["environment", "hostname", "samples?", "interval?"],
+    },
+    {
+        "name": "os_disk_stats",
+        "description": (
+            "OS MONITORING — Raccoglie utilizzo filesystem (df) e I/O disco (iostat) dal server. "
+            "Parametro opzionale --fs per filtrare un mount point specifico. "
+            "Se iostat non disponibile: io_samples=[], io_available=false (nessun errore). "
+            "Parametri opzionali: samples (default 5), interval (default 2s), fs (mount point)."
+        ),
+        "params": ["environment", "hostname", "samples?", "interval?", "fs?"],
+    },
     # --- Runbook orchestrati (M8) ---
     {
         "name": "diagnose_instance",
@@ -322,6 +352,18 @@ TOOL_CATALOG: list[dict] = [
             "Usare quando viene segnalato o rilevato un ORA-04030."
         ),
         "params": ["environment", "hostname", "instance_name", "since?", "pdb?"],
+    },
+    {
+        "name": "diagnose_os_pressure",
+        "description": (
+            "RUNBOOK — Analisi pressione OS correlata con stato Oracle in una chiamata sola. "
+            "Esegue in parallelo: os_cpu_stats, os_memory_stats, os_disk_stats, "
+            "check_memory_pressure, check_resource_limits, sessions_by_user. "
+            "Restituisce livello_pressione_os (bassa/media/alta), livello_pressione_oracle, "
+            "correlazioni cross-domain e raccomandazioni. "
+            "Usare quando si sospetta che il server stia soffrendo a livello OS."
+        ),
+        "params": ["environment", "hostname", "instance_name", "samples?", "interval?"],
     },
 ]
 
@@ -622,6 +664,60 @@ MCP_TOOLS: list[dict] = [
             "required": ["environment", "hostname", "instance_name"],
         },
     },
+    # --- OS Monitoring ---
+    {
+        "name": "os_cpu_stats",
+        "description": (
+            "OS MONITORING — Raccoglie metriche CPU e run queue dal server via vmstat (AIX e Linux). "
+            "Campionamento multiplo con statistiche aggregate min/max/avg/p95/p99. "
+            "Parametri opzionali: samples (default 5), interval (default 2s). "
+            "Firma: ENV HOSTNAME — nessun INSTANCE_NAME (tool OS-level)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_ENV_HOST_PROPS,
+                "samples":  {"type": "integer", "description": "Numero di campioni (default: 5)", "minimum": 1},
+                "interval": {"type": "integer", "description": "Secondi tra campioni (default: 2)", "minimum": 0},
+            },
+            "required": ["environment", "hostname"],
+        },
+    },
+    {
+        "name": "os_memory_stats",
+        "description": (
+            "OS MONITORING — Raccoglie metriche RAM e swap dal server (svmon+lsps su AIX, free su Linux). "
+            "Include page in/out da vmstat. Campionamento multiplo con statistiche aggregate. "
+            "Parametri opzionali: samples (default 5), interval (default 2s)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_ENV_HOST_PROPS,
+                "samples":  {"type": "integer", "description": "Numero di campioni (default: 5)", "minimum": 1},
+                "interval": {"type": "integer", "description": "Secondi tra campioni (default: 2)", "minimum": 0},
+            },
+            "required": ["environment", "hostname"],
+        },
+    },
+    {
+        "name": "os_disk_stats",
+        "description": (
+            "OS MONITORING — Raccoglie utilizzo filesystem (df) e I/O disco (iostat) dal server. "
+            "Se iostat non disponibile: io_samples=[], io_available=false (nessun errore). "
+            "Parametri opzionali: samples (default 5), interval (default 2s), fs (mount point)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_ENV_HOST_PROPS,
+                "samples":  {"type": "integer", "description": "Numero di campioni I/O (default: 5)", "minimum": 1},
+                "interval": {"type": "integer", "description": "Secondi tra campioni (default: 2)", "minimum": 0},
+                "fs":       {"type": "string",  "description": "Filtra per mount point (es. /oracle/data)"},
+            },
+            "required": ["environment", "hostname"],
+        },
+    },
     # --- Runbook orchestrati (M8) ---
     {
         "name": "diagnose_instance",
@@ -668,6 +764,26 @@ MCP_TOOLS: list[dict] = [
                 **_BASE_PROPS,
                 "since": {"type": "string", "description": "Considera solo errori dal timestamp >= YYYY-MM-DD"},
                 "pdb": {"type": "string", "description": "Filtra per nome PDB (es. AIMELA). Usa 'CDB' per il container root."},
+            },
+            "required": ["environment", "hostname", "instance_name"],
+        },
+    },
+    {
+        "name": "diagnose_os_pressure",
+        "description": (
+            "RUNBOOK — Analisi pressione OS correlata con stato Oracle in una chiamata sola. "
+            "Esegue in parallelo: os_cpu_stats, os_memory_stats, os_disk_stats, "
+            "check_memory_pressure, check_resource_limits, sessions_by_user. "
+            "Restituisce livello_pressione_os (bassa/media/alta), livello_pressione_oracle, "
+            "correlazioni cross-domain e raccomandazioni. "
+            "Usare quando si sospetta che il server stia soffrendo a livello OS."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                **_BASE_PROPS,
+                "samples":  {"type": "integer", "description": "Numero di campioni OS (default: 5)", "minimum": 1},
+                "interval": {"type": "integer", "description": "Secondi tra campioni (default: 2)", "minimum": 0},
             },
             "required": ["environment", "hostname", "instance_name"],
         },
@@ -851,6 +967,23 @@ def _dispatch_tool(name: str, args: dict) -> dict:
             env, host, inst,
             since=args.get("since"),
             pdb=args.get("pdb"),
+        )
+
+    if name in ("os_cpu_stats", "os_memory_stats", "os_disk_stats"):
+        extra = []
+        if args.get("samples") is not None:
+            extra.append(f"--samples={args['samples']}")
+        if args.get("interval") is not None:
+            extra.append(f"--interval={args['interval']}")
+        if name == "os_disk_stats" and args.get("fs"):
+            extra.append(f"--fs={args['fs']}")
+        return run_primitive_tool(name, env, host, *extra)
+
+    if name == "diagnose_os_pressure":
+        return diagnose_os_pressure(
+            env, host, inst,
+            samples=int(args.get("samples") or 5),
+            interval=int(args.get("interval") or 2),
         )
 
     # fallback (non dovrebbe mai arrivare qui grazie al check precedente)

@@ -43,16 +43,18 @@ validate_args "$TOOL" "$ENV" "$HOST" "$INST" || exit $?
 #      su versioni supportate — restituisce al massimo zero righe
 #    - La riga blank dopo ogni PROMPT è obbligatoria (gotcha sqlplus)
 sql_block=$(printf \
-'SET MARKUP CSV ON
+'SET COLSEP ","
 SET FEEDBACK OFF
 SET HEADING OFF
 SET PAGESIZE 0
+SET LINESIZE 32767
 SET TRIMSPOOL ON
 WHENEVER SQLERROR EXIT 1
 select version from v$instance;
 PROMPT MARKER2
 
 SET HEADING ON
+SET PAGESIZE 9999
 SELECT name, space_limit, space_used, space_reclaimable, number_of_files
 FROM v$recovery_file_dest;
 PROMPT MARKER3

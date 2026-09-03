@@ -436,3 +436,276 @@ def runbook_ora04030(env: str, host: str, inst: str,
     env_out = _envelope(TOOL, env, host, inst, data, summary)
     env_out["oracle_version"] = oracle_version
     return env_out
+
+
+# ---------------------------------------------------------------------------
+# diagnose_os_pressure
+# ---------------------------------------------------------------------------
+
+def diagnose_os_pressure(env: str, host: str, inst: str,
+                          samples: int = 5, interval: int = 2) -> dict:
+    """Analisi pressione OS correlata con stato Oracle.
+
+    Esegue in parallelo:
+      - os_cpu_stats    → CPU user/sys/idle/wait%, run queue
+      - os_memory_stats → RAM/swap usage, page in/out
+      - os_disk_stats   → filesystem usage, I/O throughput/latenza
+      - check_memory_pressure → PGA Oracle
+      - check_resource_limits → limiti sessioni/processi Oracle
+      - sessions_by_user      → sessioni Oracle attive per utente
+
+    Produce un summary con:
+      - livello_pressione_os:     bassa/media/alta
+      - livello_pressione_oracle: bassa/media/alta (da check_memory_pressure)
+      - correlazioni: osservazioni che incrociano dominio OS e Oracle
+      - raccomandazioni: lista ordinata per priorità
+      - details: risultati raw di ogni primitivo
+    """
+    TOOL = "diagnose_os_pressure"
+
+    samples_arg = f"--samples={samples}"
+    interval_arg = f"--interval={interval}"
+
+    tasks = [
+        ("cpu",       "os_cpu_stats",          env, host, samples_arg, interval_arg),
+        ("memory",    "os_memory_stats",        env, host, samples_arg, interval_arg),
+        ("disk",      "os_disk_stats",          env, host, samples_arg, interval_arg),
+        ("resources", "check_resource_limits",  env, host, inst),
+        ("sessions",  "sessions_by_user",       env, host, inst),
+    ]
+    res = _run_parallel(tasks)
+
+    # check_memory_pressure è già un orchestrato: lo chiamiamo separatamente
+    # (non può essere invocato come primitivo via run_primitive_tool)
+    mem_pressure = check_memory_pressure(env, host, inst)
+    res["mem_pressure"] = mem_pressure
+
+    oracle_version = mem_pressure.get("oracle_version")
+
+    # --- Analisi CPU ---
+    cpu_summary = {}
+    cpu_count = 0
+    os_type = "unknown"
+    if _ok(res["cpu"]):
+        cpu_data = res["cpu"].get("data", {})
+        if isinstance(cpu_data, dict):
+            cpu_summary = cpu_data.get("summary", {})
+            cpu_count = cpu_data.get("cpu_count", 0) or 0
+            os_type = cpu_data.get("os_type", "unknown")
+
+    cpu_wait_avg = 0.0
+    run_queue_avg = 0.0
+    if cpu_summary:
+        cpu_wait_avg = float((cpu_summary.get("cpu_wait_pct") or {}).get("avg") or 0)
+        run_queue_avg = float((cpu_summary.get("run_queue") or {}).get("avg") or 0)
+
+    # --- Analisi memoria OS ---
+    mem_summary = {}
+    swap_used_avg = 0
+    swap_total = 0
+    swap_used_pct = 0.0
+    ram_free_pct = 100.0
+    page_out_avg = 0.0
+    if _ok(res["memory"]):
+        mem_data = res["memory"].get("data", {})
+        if isinstance(mem_data, dict):
+            mem_summary = mem_data.get("summary", {})
+            samples_list = mem_data.get("samples", [])
+            if samples_list:
+                last_s = samples_list[-1]
+                ram_total = float(last_s.get("ram_total_bytes") or 1)
+                ram_free = float(last_s.get("ram_free_bytes") or 0)
+                swap_total = float(last_s.get("swap_total_bytes") or 0)
+                swap_used_s = float(last_s.get("swap_used_bytes") or 0)
+                if ram_total > 0:
+                    ram_free_pct = ram_free / ram_total * 100
+                if swap_total > 0:
+                    swap_used_pct = swap_used_s / swap_total * 100
+            if mem_summary:
+                page_out_avg = float((mem_summary.get("page_out_per_sec") or {}).get("avg") or 0)
+
+    # --- Analisi disco OS ---
+    disk_io_await_max = 0.0
+    disk_data = {}
+    if _ok(res["disk"]):
+        disk_data = res["disk"].get("data", {})
+        if isinstance(disk_data, dict):
+            disk_summary = disk_data.get("summary", {}).get("io", {})
+            for dev_stats in disk_summary.values():
+                await_p95 = float((dev_stats.get("await_ms") or {}).get("p95") or 0)
+                if await_p95 > disk_io_await_max:
+                    disk_io_await_max = await_p95
+
+    # --- Analisi Oracle resource limits ---
+    resource_near_limit = []
+    if _ok(res["resources"]):
+        for row in _data(res["resources"]):
+            name = row.get("resource_name", "")
+            current = row.get("current_utilization")
+            limit = row.get("max_utilization") or row.get("limit_value")
+            try:
+                if limit and int(limit) > 0:
+                    pct = int(current or 0) / int(limit) * 100
+                    if pct >= 80:
+                        resource_near_limit.append(
+                            f"{name}: {current}/{limit} ({pct:.0f}%)"
+                        )
+            except (ValueError, TypeError):
+                pass
+
+    # --- Analisi Oracle memory pressure ---
+    oracle_mem_summary = mem_pressure.get("summary", {})
+    livello_pressione_oracle = oracle_mem_summary.get("livello_pressione", "sconosciuto")
+    top_pga_mb = float(oracle_mem_summary.get("totale_pga_top20_mb") or 0)
+
+    # --- Calcolo livello pressione OS ---
+    # Regole: se ≥2 indicatori in zona rossa → alta; ≥1 → media; else → bassa
+    indicatori_rossi = []
+    indicatori_gialli = []
+
+    if cpu_count > 0 and run_queue_avg > 2 * cpu_count:
+        indicatori_rossi.append(f"run queue media ({run_queue_avg:.1f}) > 2× cpu_count ({cpu_count})")
+    elif cpu_count > 0 and run_queue_avg > cpu_count:
+        indicatori_gialli.append(f"run queue media ({run_queue_avg:.1f}) > cpu_count ({cpu_count})")
+
+    if cpu_wait_avg > 40:
+        indicatori_rossi.append(f"CPU wait% medio ({cpu_wait_avg:.1f}%) > 40%")
+    elif cpu_wait_avg > 20:
+        indicatori_gialli.append(f"CPU wait% medio ({cpu_wait_avg:.1f}%) > 20%")
+
+    if swap_used_pct > 80:
+        indicatori_rossi.append(f"swap utilizzata al {swap_used_pct:.1f}% (>80%)")
+    elif swap_used_pct > 50:
+        indicatori_gialli.append(f"swap utilizzata al {swap_used_pct:.1f}% (>50%)")
+
+    if ram_free_pct < 5:
+        indicatori_rossi.append(f"RAM quasi esaurita: solo {ram_free_pct:.1f}% libera")
+    elif ram_free_pct < 10:
+        indicatori_gialli.append(f"RAM bassa: {ram_free_pct:.1f}% libera")
+
+    if page_out_avg > 10:
+        indicatori_rossi.append(f"page-out medio ({page_out_avg:.1f}/s) — OS sta paginando su disco")
+    elif page_out_avg > 1:
+        indicatori_gialli.append(f"page-out medio ({page_out_avg:.1f}/s) — attività swap presente")
+
+    if disk_io_await_max > 100:
+        indicatori_rossi.append(f"latenza I/O disco p95 ({disk_io_await_max:.1f}ms) > 100ms")
+    elif disk_io_await_max > 50:
+        indicatori_gialli.append(f"latenza I/O disco p95 ({disk_io_await_max:.1f}ms) > 50ms")
+
+    if len(indicatori_rossi) >= 2:
+        livello_pressione_os = "alta"
+    elif len(indicatori_rossi) == 1 or len(indicatori_gialli) >= 2:
+        livello_pressione_os = "media"
+    else:
+        livello_pressione_os = "bassa"
+
+    # --- Correlazioni cross-domain ---
+    correlazioni = []
+
+    if run_queue_avg > (2 * cpu_count if cpu_count > 0 else 4) and top_pga_mb >= 512:
+        correlazioni.append(
+            "CPU run queue alta + PGA Oracle elevata: possibile bottleneck CPU da query intensive "
+            "con hash join/sort su disco. Verificare query con alto consumo CPU."
+        )
+
+    if cpu_wait_avg > 30:
+        correlazioni.append(
+            f"CPU wait% OS alto ({cpu_wait_avg:.1f}%): attesa I/O significativa a livello OS. "
+            "Correlare con check_fra_usage per verificare pressione su disco archivelog/FRA."
+        )
+
+    if swap_used_pct > 50 and livello_pressione_oracle in ("alta", "media"):
+        correlazioni.append(
+            f"Swap OS utilizzata al {swap_used_pct:.1f}% e pressione Oracle {livello_pressione_oracle}: "
+            "rischio OOM per processi Oracle. Ridurre PGA_AGGREGATE_TARGET o sessioni concorrenti."
+        )
+
+    if swap_used_pct > 80 and not _ok(res["resources"]):
+        correlazioni.append(
+            "Swap OS >80% e Oracle irraggiungibile: possibile OOM — host sotto stress critico. "
+            "Verificare se i processi Oracle sono in stato D (uninterruptible sleep)."
+        )
+
+    if disk_io_await_max > 50 and top_pga_mb >= 512:
+        correlazioni.append(
+            f"Latenza disco p95 {disk_io_await_max:.1f}ms + PGA Oracle elevata ({top_pga_mb:.0f}MB): "
+            "probabile I/O da sort/hash su disco. Aumentare PGA_AGGREGATE_TARGET o ottimizzare le query."
+        )
+
+    if resource_near_limit:
+        correlazioni.append(
+            "Oracle vicino ai limiti di risorse: " + "; ".join(resource_near_limit) + ". "
+            "Ulteriori connessioni potrebbero fallire con ORA-00018 o ORA-00020."
+        )
+
+    if not correlazioni:
+        correlazioni.append("Nessuna correlazione critica rilevata tra OS e Oracle.")
+
+    # --- Raccomandazioni ---
+    raccomandazioni = []
+    if livello_pressione_os == "alta":
+        raccomandazioni.append(
+            "URGENTE: pressione OS alta. Identificare e ridurre i processi che consumano "
+            "CPU o memoria prima che si verifichino errori Oracle (ORA-04030, ORA-07445)."
+        )
+    if swap_used_pct > 80:
+        raccomandazioni.append(
+            f"Swap al {swap_used_pct:.1f}%: aggiungere RAM o ridurre il numero di sessioni Oracle "
+            "per evitare OOM. Considerare di verificare l'impostazione di MEMORY_TARGET."
+        )
+    if cpu_wait_avg > 30:
+        raccomandazioni.append(
+            "CPU wait elevato: verificare colli di bottiglia I/O (iostat, check_fra_usage). "
+            "Possibile necessità di bilanciare i datafile su più spindle/LUN."
+        )
+    if disk_io_await_max > 50:
+        raccomandazioni.append(
+            f"Latenza disco elevata ({disk_io_await_max:.1f}ms p95): verificare saturazione storage. "
+            "Considerare la distribuzione dei file Oracle su volumi separati."
+        )
+    if livello_pressione_oracle == "alta":
+        raccomandazioni.append(
+            "Pressione PGA Oracle alta: eseguire check_memory_pressure per identificare le sessioni "
+            "con consumo anomalo e valutare il tuning di PGA_AGGREGATE_TARGET."
+        )
+    if not raccomandazioni:
+        raccomandazioni.append("Nessuna azione immediata richiesta. Sistema nella norma.")
+
+    summary = {
+        "livello_pressione_os": livello_pressione_os,
+        "livello_pressione_oracle": livello_pressione_oracle,
+        "os_type": os_type,
+        "indicatori_critici_os": indicatori_rossi,
+        "indicatori_attenzione_os": indicatori_gialli,
+        "correlazioni": correlazioni,
+        "raccomandazioni": raccomandazioni,
+        "metriche_os": {
+            "cpu_wait_pct_avg": round(cpu_wait_avg, 1),
+            "run_queue_avg": round(run_queue_avg, 1),
+            "cpu_count": cpu_count,
+            "ram_free_pct": round(ram_free_pct, 1),
+            "swap_used_pct": round(swap_used_pct, 1),
+            "page_out_per_sec_avg": round(page_out_avg, 1),
+            "disk_io_await_p95_ms": round(disk_io_await_max, 1),
+        },
+        "pressione_oracle_detail": {
+            "livello": livello_pressione_oracle,
+            "top_pga_mb": top_pga_mb,
+            "resource_near_limit": resource_near_limit,
+        },
+    }
+
+    data = [
+        {"sezione": "os_cpu_stats",          "result": res["cpu"]},
+        {"sezione": "os_memory_stats",        "result": res["memory"]},
+        {"sezione": "os_disk_stats",          "result": res["disk"]},
+        {"sezione": "check_memory_pressure",  "result": mem_pressure},
+        {"sezione": "check_resource_limits",  "result": res["resources"]},
+        {"sezione": "sessions_by_user",       "result": res["sessions"]},
+    ]
+
+    env_out = _envelope(TOOL, env, host, inst, data, summary)
+    env_out["oracle_version"] = oracle_version
+    return env_out
+

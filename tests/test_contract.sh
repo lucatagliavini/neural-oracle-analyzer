@@ -320,6 +320,29 @@ test_top_pga_limit() {
     fi
 }
 
+# --- Test: parametri opzionali tool OS ----------------------------------------
+
+test_os_tool_params() {
+    local script="$1" tool_name="$2"
+    printf "\n  [%s: --samples invalido → invalid_argument]\n" "$tool_name"
+    local out rc=0
+    out=$("$script" "TEST" "axnporadb41" "--samples=0" 2>/dev/null) || rc=$?
+    if [ "$rc" = "2" ] || ([ "$rc" = "1" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1); then
+        _ok "--samples=0 → invalid_argument"
+    else
+        _fail "--samples=0 non ha restituito invalid_argument (rc=$rc)"
+    fi
+
+    printf "  [%s: --samples=abc → invalid_argument]\n" "$tool_name"
+    rc=0
+    out=$("$script" "TEST" "axnporadb41" "--samples=abc" 2>/dev/null) || rc=$?
+    if [ "$rc" = "2" ] || ([ "$rc" = "1" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1); then
+        _ok "--samples=abc → invalid_argument"
+    else
+        _fail "--samples=abc non ha restituito invalid_argument (rc=$rc)"
+    fi
+}
+
 # --- Runner principale --------------------------------------------------------
 
 run_test() {
@@ -337,7 +360,8 @@ run_test() {
     local host_only=0
     local env_only=0
     case "$tool_name" in
-        list_instances_on_host|list_known_instances)
+        list_instances_on_host|list_known_instances|\
+        os_cpu_stats|os_memory_stats|os_disk_stats)
             host_only=1
             ;;
         list_known_hosts|list_all_hosts_and_instances)
@@ -363,7 +387,7 @@ run_test() {
                 # Tool NFS con hostname: un host fake → log_not_found
                 test_log_not_found "$script" "$tool_name"
                 ;;
-            list_instances_on_host)
+            list_instances_on_host|os_cpu_stats|os_memory_stats|os_disk_stats)
                 test_bad_host "$script" "1"
                 ;;
             *)
@@ -375,6 +399,9 @@ run_test() {
         case "$tool_name" in
             top_pga_sessions)
                 test_top_pga_limit "$script"
+                ;;
+            os_cpu_stats|os_memory_stats|os_disk_stats)
+                test_os_tool_params "$script" "$tool_name"
                 ;;
         esac
 

@@ -5,12 +5,12 @@
 #
 # Output JSON:
 #   data: array di oggetti {instance_name, env_path}
-#   Ogni elemento corrisponde a un file <INSTANCE>.env nella home oracle dell'host.
+#   Ogni elemento corrisponde a un file <INSTANCE>.env CDB nella home oracle dell'host.
 #
 # Note:
-#   - Non esegue sqlplus: usa solo SSH + ls per elencare gli env file CDB.
-#   - Il pattern NP*.env corrisponde ai CDB (non ai PDB, che hanno nomi applicativi).
-#   - Validato su axnporadb41: restituisce tutti i CDB fisicamente ospitati sull'host.
+#   - Non esegue sqlplus: usa solo SSH + ls+grep per elencare gli env file CDB.
+#   - Elenca tutti i *.env, poi esclude quelli con ORACLE_PDB_SID non vuoto (= PDB).
+#   - Funziona su tutti gli ambienti (noprod: NP*.env, prod: BPMSPROD.env, PP*.env, ...)
 
 set -uo pipefail
 # Nota: set -e non usato — la gestione degli errori avviene esplicitamente
@@ -40,10 +40,22 @@ if [ -z "$HOST" ]; then
 fi
 
 # 3. Recupera lista env file CDB via SSH (non richiede sqlplus)
+#    Logica remota (ksh-compatibile):
+#      - ls $HOME/*.env elenca tutti gli env file Oracle
+#      - per ciascuno, se ORACLE_PDB_SID è vuoto o assente → è un CDB, lo stampa
+#      - i PDB env file hanno ORACLE_PDB_SID impostato al nome del PDB
+#    Note ksh/AIX:
+#      - grep senza -s (opzione non supportata su AIX)
+#      - glob $HOME/*.env senza virgolette (le virgolette inibiscono l'espansione su ksh)
 ssh_opts="-i ${ORACLE_SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes"
 
-raw_list=$(ssh $ssh_opts "${ORACLE_SSH_USER}@${HOST}" \
-    'ls ~/NP*.env 2>/dev/null || true' 2>/dev/null) || {
+raw_list=$(ssh $ssh_opts "${ORACLE_SSH_USER}@${HOST}" '
+for f in $(ls $HOME/*.env 2>/dev/null); do
+    [ -f "$f" ] || continue
+    pdb_sid=$(grep "^ORACLE_PDB_SID=" "$f" 2>/dev/null | cut -d= -f2 | tr -d " \t\r")
+    [ -z "$pdb_sid" ] && printf "%s\n" "$f"
+done
+' 2>/dev/null) || {
     build_error_json "$TOOL" "$ENV" "$HOST" "" \
         "connection_failed" \
         "SSH non raggiungibile: ${ORACLE_SSH_USER}@${HOST}" \
@@ -58,7 +70,7 @@ if [ -z "$raw_list" ]; then
 fi
 
 # 4. Costruisci array JSON da lista di path
-# Ogni riga: /home/oracle/NP41CDB0.env → {instance_name: "NP41CDB0", env_path: "/home/oracle/NP41CDB0.env"}
+# Ogni riga: /home/oracle/BPMSPROD.env → {instance_name: "BPMSPROD", env_path: "/home/oracle/BPMSPROD.env"}
 data=$(printf '%s\n' "$raw_list" | awk '
 BEGIN { first=1; print "[" }
 /\.env$/ {

@@ -12,15 +12,16 @@ This file provides guidance to agents when working with code in this repository.
 3. Solo se necessario per la milestone da avviare: leggere il file specs rilevante in [`docs/specs/`](docs/specs/).
 4. Non scrivere codice prima di aver completato i passi 1–2.
 
-**Ultimo file di sessione**: [`docs/sessions/2026-09-06-2.md`](docs/sessions/2026-09-06-2.md)
-— Stato: M0–M9 ✅ completate | prossimo: git tag + SSL quando disponibile
-— 21 tool MCP attivi su `lxprworkerlana01:8420` | 525 test bash + 65 test MCP wire = 590 totali
-— TOOL-002 ✅ chiusa: scan_alert_log 388 MB con --since → 1.4s (era ~30s+)
+**Ultimo file di sessione**: [`docs/sessions/2026-09-08.md`](docs/sessions/2026-09-08.md)
+— Stato: M0–M10 ✅ completate | OS monitoring implementato
+— 25 tool MCP attivi su `lxprworkerlana01:8420` | 51 test --quick bash
+— Nuovi tool: os_cpu_stats, os_memory_stats, os_disk_stats, diagnose_os_pressure
+— Nuova lib: lib/os_cmd.sh (os_detect, os_check_cmd, os_sample) cross-platform AIX/Linux
 — Proxy HTTP attivo su porta 80 (SSL placeholder commentato)
 
 ## Project state
 
-M0–M9 completate. 17 tool primitivi bash + 4 Python orchestrati attivi su `lxprworkerlana01:8420`. 590 test (525 bash + 65 MCP wire). TOOL-002 risolta: pre-filtraggio I/O in scan_alert_log.sh — 1.4s su file da 388 MB con --since (era ~30s+). Proxy HTTP attivo su porta 80 con ProxyTimeout 300.
+M0–M10 completate. 21 tool primitivi bash + 4 Python orchestrati attivi su `lxprworkerlana01:8420`. 51 test --quick bash. M10: 3 nuovi tool OS (os_cpu_stats, os_memory_stats, os_disk_stats) + orchestrato diagnose_os_pressure + lib/os_cmd.sh cross-platform AIX/Linux. Proxy HTTP attivo su porta 80 con ProxyTimeout 300.
 `docs/specs/` è la fonte autoritativa — leggerla prima di scrivere codice.
 
 ## Goal
@@ -99,6 +100,14 @@ Fixture in `tests/fixtures/<tool>.ok.json` con header `#ENV=` `#HOST=` `#INST=` 
 19. **`_has_key` nei test**: `jq -e ".$key"` restituisce non-zero per valori `null` — usare `jq -e "has(\"$key\")"` per verificare presenza chiave indipendentemente dal valore.
 20. **ksh: `. file` su file inesistente termina la shell** — anche con `2>/dev/null`, il dot-source su file mancante fa uscire la shell ksh immediatamente (exit 1), il `||` non scatta. Usare `[ -f file ] && . file || fallback` per gestire l'assenza in modo sicuro. Bash non ha questo problema.
 21. **`find` ricorsivo su NFS può bloccarsi** — le directory `cdmp_*` nel trace Oracle RAC possono avere handle NFS problematici che bloccano `getdents()` indefinitamente. Quando la struttura del path è nota, usare un glob a profondità fissa (`ls $base/*/$INST/trace/alert_$INST.log`) invece di `find -name`.
+22. **`SET MARKUP CSV ON` non disponibile su Oracle < 12.2**: su Oracle 12.1 e 11g, sqlplus ignora il comando e produce output tabulare con tab. Usare `SET COLSEP ","` + `SET PAGESIZE 9999` (per l'header) + `SET LINESIZE 32767` per compatibilità universale.
+23. **Glob ksh AIX via SSH**: quote singole attorno a `*.env` (come `'*.env'` o `'"'"'*.env'"'"'`) inibiscono l'espansione del glob su ksh AIX. Usare `ls $HOME/*.env 2>/dev/null` senza virgolette.
+24. **`grep -s` non disponibile su AIX ksh**: usare `grep ... 2>/dev/null` come equivalente.
+25. **Riga separatori `---` nell'output sqlplus**: con `SET COLSEP ","` Oracle emette una riga di soli trattini tra header e dati. Il parser `_csv_to_json_array` la deve ignorare (`/^[-,[:space:]]+$/ { next }`).
+26. **`sprintf(multiriga)` awk inline**: alcune versioni di gawk/mawk interpretano la chiamata `sprintf(fmt, ...)` con la stringa di formato spezzata su più righe fisiche come "unexpected newline or end of string". Usare concatenazione diretta: `entry = "pre" x "mid" y "post"` invece di `sprintf("pre%smid%spost", x, y)`.
+27. **`print` vs `printf` in awk inline**: `print "["` aggiunge `\n` — se il JSON viene poi concatenato in bash, il newline invalida il parsing. Usare `printf "["` e `printf "]"` per output JSON in awk.
+28. **`svmon -G -O unit=byte` non disponibile su AIX < 7.2**: usare `svmon -G` (output in pagine) e moltiplicare per la page size (rilevata dalla riga `s N KB` dell'output; default 4KB).
+29. **`df -k` AIX**: colonne diverse da Linux — `$2=1024-blocks(KB) $3=Free(KB) $4=%Used $NF=MountPoint`. Heuristica di rilevamento: se `$5 ~ /%/` → Linux, altrimenti AIX.
 
 ## NFS path structure
 

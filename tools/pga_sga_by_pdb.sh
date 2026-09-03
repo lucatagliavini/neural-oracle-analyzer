@@ -28,16 +28,18 @@ validate_args "$TOOL" "$ENV" "$HOST" "$INST" || exit $?
 
 # Unica connessione SSH: versione + dati
 sql_block=$(printf \
-'SET MARKUP CSV ON
+'SET COLSEP ","
 SET FEEDBACK OFF
 SET HEADING OFF
 SET PAGESIZE 0
+SET LINESIZE 32767
 SET TRIMSPOOL ON
 WHENEVER SQLERROR EXIT 1
 select version from v$instance;
 PROMPT ORAMARKER
 
 SET HEADING ON
+SET PAGESIZE 9999
 SELECT r.con_id, p.pdb_name, r.pga_bytes, r.sga_bytes,
        r.buffer_cache_bytes, r.shared_pool_bytes, r.plan_name
 FROM v$rsrcpdbmetric r
