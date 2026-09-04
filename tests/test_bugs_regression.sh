@@ -1301,40 +1301,64 @@ fi
 # R-02 — list_known_instances: resident corretto via realpath
 # ---------------------------------------------------------------------------
 if _should_run "R-02"; then
-    _section_header "R-02" "list_known_instances: resident via realpath (log sotto NFS_HOST_BASE)"
+    _section_header "R-02" "list_known_instances: resident basato su eta del log (fix strutturale)"
 
-    # axnporadb41: NP41CDB0/1/2 hanno log fisici → resident=true.
-    # NP43CDB0/NP44CDB0 hanno anch'essi log fisici nell'albero dell'host (non symlink):
-    # sul mount NFS di axnporadb41 ogni istanza ha il proprio path fisico → resident=true.
-    # Il fix R-02 garantisce che symlink verso altri host → resident=false; ma su questo
-    # host la struttura è a file fisici, quindi tutte le istanze con log presenti → true.
+    # Struttura NFS su axnporadb41:
+    #   - NP41CDB0/1/2: log aggiornati oggi → resident=true (istanze attive)
+    #   - NP43CDB0/NP44CDB0: log fermi da ~570 giorni (istanze migrate) → resident=false
+    #   - NP41CDB1 duplicato: np41cdb0/NP41CDB1 (vecchio, 534g) vs np41cdb1/NP41CDB1 (corrente)
+    #     → dedup sceglie np41cdb1 (più recente), NP41CDB1 deve risultare resident=true
     out=$(_run_tool "${TOOLS_DIR}/list_known_instances.sh" "$ENV" "$HOST") || true
     if _assert_json_valid "R-02" "$out" && _assert_status_ok "R-02" "$out"; then
         n=$(_jq "$out" ".data | length")
         _ok "R-02: list_known_instances restituisce $n istanze"
 
-        # Verifica che tutte le istanze abbiano il campo resident (bool)
+        # Verifica che tutte le istanze abbiano i campi resident e log_age_days
         n_with_resident=$(printf '%s' "$out" | jq '[.data[] | select(has("resident"))] | length')
         [ "${n_with_resident:-0}" = "$n" ] \
             && _ok "R-02: tutte le $n istanze hanno il campo resident" \
             || _fail "R-02: solo $n_with_resident/$n istanze hanno il campo resident"
+        n_with_age=$(printf '%s' "$out" | jq '[.data[] | select(has("log_age_days"))] | length')
+        [ "${n_with_age:-0}" = "$n" ] \
+            && _ok "R-02: tutte le $n istanze hanno il campo log_age_days" \
+            || _fail "R-02: solo $n_with_age/$n istanze hanno il campo log_age_days"
 
-        # Istanze con log presente → resident=true
-        for native_inst in "NP41CDB0" "NP41CDB1" "NP41CDB2"; do
-            r=$(printf '%s' "$out" | jq -r ".data[] | select(.instance_name==\"$native_inst\") | .resident // \"absent\"")
+        # Istanze attive: log aggiornato di recente → resident=true
+        for active_inst in "NP41CDB0" "NP41CDB1" "NP41CDB2"; do
+            r=$(printf '%s' "$out" | jq -r ".data[] | select(.instance_name==\"$active_inst\") | .resident // \"absent\"")
+            age=$(printf '%s' "$out" | jq -r ".data[] | select(.instance_name==\"$active_inst\") | .log_age_days // \"-1\"")
             if [ "$r" = "absent" ]; then
-                _skip "R-02/$native_inst: non trovato nell'inventario"
+                _skip "R-02/$active_inst: non trovato nell'inventario"
             elif [ "$r" = "true" ]; then
-                _ok "R-02/$native_inst: resident=true (log fisico presente)"
+                _ok "R-02/$active_inst: resident=true, log_age_days=$age (istanza attiva)"
             else
-                _fail "R-02/$native_inst: resident=$r (atteso true — log fisico presente)"
+                _fail "R-02/$active_inst: resident=$r log_age_days=$age (atteso true — istanza attiva)"
             fi
         done
 
-        # Verifica che le istanze senza log abbiano resident=false
-        n_false=$(printf '%s' "$out" | jq '[.data[] | select(.resident==false)] | length')
-        n_null_log=$(printf '%s' "$out" | jq '[.data[] | select(.alert_log_path == "" or .alert_log_path == null)] | length')
-        _ok "R-02: istanze con resident=false=$n_false, istanze senza log=$n_null_log"
+        # Istanze migrate: log fermo da mesi → resident=false
+        for stale_inst in "NP43CDB0" "NP44CDB0"; do
+            r=$(printf '%s' "$out" | jq -r ".data[] | select(.instance_name==\"$stale_inst\") | .resident // \"absent\"")
+            age=$(printf '%s' "$out" | jq -r ".data[] | select(.instance_name==\"$stale_inst\") | .log_age_days // \"-1\"")
+            if [ "$r" = "absent" ]; then
+                _skip "R-02/$stale_inst: non trovato nell'inventario"
+            elif [ "$r" = "false" ]; then
+                _ok "R-02/$stale_inst: resident=false, log_age_days=$age (istanza migrata — R-02 risolto)"
+            else
+                _fail "R-02/$stale_inst: resident=$r log_age_days=$age (atteso false — log vecchio di $age giorni)"
+            fi
+        done
+
+        # Verifica deduplicazione NP41CDB1: deve usare il volume np41cdb1 (più recente),
+        # non np41cdb0 (log vecchio da 534 giorni)
+        vol_np41cdb1=$(printf '%s' "$out" | jq -r '.data[] | select(.instance_name=="NP41CDB1") | .volume // "absent"')
+        if [ "$vol_np41cdb1" = "absent" ]; then
+            _skip "R-02/NP41CDB1-dedup: NP41CDB1 non trovato"
+        elif [ "$vol_np41cdb1" = "np41cdb1" ]; then
+            _ok "R-02/NP41CDB1-dedup: volume=np41cdb1 (log piu recente scelto correttamente)"
+        else
+            _fail "R-02/NP41CDB1-dedup: volume=$vol_np41cdb1 (atteso np41cdb1 — dedup dovrebbe scegliere il log piu recente)"
+        fi
     fi
 fi
 

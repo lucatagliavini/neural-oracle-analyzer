@@ -4,12 +4,19 @@
 # Uso: list_known_instances.sh ENVIRONMENT HOSTNAME
 #
 # Output JSON:
-#   data: array di oggetti {instance_name, volume, alert_log_path}
-#   Ogni elemento corrisponde a una directory istanza trovata nel mount NFS.
-#   Le istanze duplicate (presenti sotto più volumi) sono deuplicate per nome:
-#   viene mantenuta quella con l'alert log più recente (stessa logica di find_alert_log).
-#   volume: nome del volume/filesystem NFS (es. "np41cdb0")
-#   alert_log_path: path completo dell'alert log trovato, o null se assente
+#   data: array di oggetti {instance_name, volume, alert_log_path, resident}
+#
+#   resident: true  — l'istanza è attiva su questo host: il suo alert log è stato
+#                     modificato di recente (entro RESIDENT_MAX_AGE_DAYS giorni).
+#                     Oracle scrive nell'alert log almeno ogni pochi minuti su istanze
+#                     operative; un log fermo da mesi appartiene a un'istanza che non
+#                     è più residente qui (migrata, shutdown definitivo, cross-mount RAC).
+#   resident: false — il log è assente oppure è vecchio (fermo da > RESIDENT_MAX_AGE_DAYS).
+#
+#   Deduplicazione per duplicati: quando un'istanza appare sotto più volumi (caso
+#   comune durante/dopo migrazioni — es. np41cdb0/NP41CDB1 e np41cdb1/NP41CDB1 coesistono)
+#   viene mantenuto il volume con il log PIÙ RECENTE (stesso criterio di find_alert_log).
+#   Il log vecchio non viene esposto, evitando di mostrare resident=true su log storici.
 #
 # Note:
 #   - Non esegue connessioni SSH né sqlplus: legge solo il filesystem NFS locale.
@@ -21,6 +28,11 @@ set -uo pipefail
 TOOL="list_known_instances"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../lib/oracle_conn.sh"
+
+# Soglia di residenza: log non modificato da più di N giorni → resident=false.
+# 30 giorni è conservativo: copre manutenzioni estese (patch, vacanze) ma esclude
+# i log storici da migrazioni (tipicamente fermi da mesi/anni).
+RESIDENT_MAX_AGE_DAYS=30
 
 ENV="${1:-}"
 HOST="${2:-}"
@@ -61,71 +73,99 @@ if [ ! -d "$NFS_HOST_BASE" ]; then
     exit 1
 fi
 
-# BUG-06 / R-02: campo resident (bool).
-# resident=true  → l'alert log esiste ed è fisicamente sotto NFS_HOST_BASE
-#                  (path reale con prefisso dell'host, non un symlink verso un altro host).
-# resident=false → la directory istanza è visibile via NFS ma il log è assente o è un
-#                  symlink che punta fuori dall'albero dell'host (struttura RAC).
-#
-# Il test usa `realpath -m` (o `readlink -f` come fallback) per risolvere i symlink:
-# se il path reale ha come prefisso NFS_HOST_BASE, l'istanza è residente su questo host.
-# Zero SSH: solo operazioni locali sul mount NFS.
-
 TS=$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")
+NOW_EPOCH=$(date +%s)
+RESIDENT_MAX_AGE_SEC=$(( RESIDENT_MAX_AGE_DAYS * 86400 ))
+
+# BUG-06 / R-02: soluzione strutturale basata sull'età del log.
+#
+# Perché realpath/symlink non funziona:
+#   La struttura NFS non usa symlink — ogni istanza ha un path fisico distinto sotto
+#   ogni host. Il mount NFS è per VOLUME STORAGE, non per host fisico: i volumi di
+#   più istanze vengono montati su tutti gli host del cluster. I log "non residenti"
+#   (es. NP43CDB0 sotto axnporadb41) sono file reali, fermi alla data in cui
+#   l'istanza era ancora configurata/attiva su quell'host.
+#
+# Soluzione: età del log come proxy di attività.
+#   Oracle scrive nell'alert log ogni pochi minuti (checkpoint, audit, heartbeat).
+#   Un log aggiornato di recente → istanza attiva qui → resident=true.
+#   Un log fermo da mesi → istanza non più residente → resident=false.
+#
+# Deduplicazione per log più recente:
+#   Quando un'istanza compare sotto più volumi (migrazione: il log vecchio rimane
+#   nel volume sorgente, quello nuovo va nel volume destinazione), si sceglie il
+#   volume con il log PIÙ RECENTE. Questo evita di esporre il log storico come
+#   "residente" quando quello corrente è sotto un altro volume.
+#   Implementazione: awk legge il mtime di ogni log via "stat -c %Y" e confronta.
 
 DATA=$(find "$NFS_HOST_BASE" -mindepth 2 -maxdepth 2 -type d 2>/dev/null \
     | sort \
     | awk -F'/' -v base="$NFS_HOST_BASE" '
 {
-    volume   = $(NF-1)
-    inst     = $NF
-    logfile  = base "/" volume "/" inst "/trace/alert_" inst ".log"
-    # Tiene traccia delle coppie (inst -> volume,logfile)
-    # In caso di duplicato, preferisce quello già noto
-    if (!(inst in seen)) {
-        seen[inst]    = 1
-        volumes[inst] = volume
-        logs[inst]    = logfile
-        order[++n]    = inst
+    volume  = $(NF-1)
+    inst    = $NF
+    logfile = base "/" volume "/" inst "/trace/alert_" inst ".log"
+
+    # Legge il mtime del log (epoch) con stat -c %Y (POSIX su Linux/RHEL).
+    # Se il file non esiste o stat fallisce: mtime=0.
+    mtime = 0
+    cmd = "stat -c %Y \"" logfile "\" 2>/dev/null"
+    if ((cmd | getline mtime_str) > 0) {
+        mtime = mtime_str + 0
+    }
+    close(cmd)
+
+    # Deduplicazione: per ogni istanza mantiene il volume con il log piu recente.
+    if (!(inst in seen) || mtime > best_mtime[inst]) {
+        seen[inst]       = 1
+        volumes[inst]    = volume
+        logs[inst]       = logfile
+        mtimes[inst]     = mtime
+        best_mtime[inst] = mtime
+        if (!(inst in ordered)) {
+            order[++n]    = inst
+            ordered[inst] = 1
+        }
     }
 }
 END {
     printf "["
     for (i = 1; i <= n; i++) {
-        inst = order[i]
-        lf   = logs[inst]
-        printf "%s{\"instance_name\":\"%s\",\"volume\":\"%s\",\"alert_log_path\":\"%s\",\"log_exists\":\"CHECK\"}",
-            (i > 1 ? "," : ""), inst, volumes[inst], lf
+        inst  = order[i]
+        lf    = logs[inst]
+        mtime = mtimes[inst]
+        printf "%s{\"instance_name\":\"%s\",\"volume\":\"%s\",\"alert_log_path\":\"%s\",\"log_mtime\":%d}",
+            (i > 1 ? "," : ""), inst, volumes[inst], lf, mtime
     }
     printf "]"
 }
 ')
 
-# Sostituisce "log_exists":"CHECK" con resident:true/false controllando il filesystem.
-# R-02: resident usa realpath per rilevare symlink verso altri host (struttura RAC).
-# Un log che esiste ma è un symlink che punta fuori da NFS_HOST_BASE → resident=false.
-# Preferisce realpath; fallback a readlink -f se realpath non è disponibile.
+# Post-processing: calcola resident dalla differenza (now - log_mtime).
+# resident=true  se log_mtime > 0 E (now - log_mtime) <= RESIDENT_MAX_AGE_SEC.
+# resident=false altrimenti (log assente, mtime=0, o troppo vecchio).
+# Aggiunge anche log_age_days per trasparenza (utile per diagnostica).
 if command -v jq >/dev/null 2>&1; then
-    DATA=$(printf '%s\n' "$DATA" | jq -c '[.[] | del(.log_exists)]' 2>/dev/null) || true
     DATA_NEW="["
     first_item=1
     while IFS= read -r row; do
-        lf=$(printf '%s' "$row" | jq -r '.alert_log_path // ""')
-        resident="false"
-        if [ -f "$lf" ]; then
-            # Risolve il path reale (segue symlink)
-            if command -v realpath >/dev/null 2>&1; then
-                real_lf=$(realpath -m "$lf" 2>/dev/null || printf '%s' "$lf")
+        mtime=$(printf '%s' "$row" | jq -r '.log_mtime // 0')
+        if [ "${mtime:-0}" -gt 0 ]; then
+            age_sec=$(( NOW_EPOCH - mtime ))
+            if [ "$age_sec" -le "$RESIDENT_MAX_AGE_SEC" ]; then
+                resident="true"
             else
-                real_lf=$(readlink -f "$lf" 2>/dev/null || printf '%s' "$lf")
+                resident="false"
             fi
-            # resident=true solo se il path reale è ancora sotto NFS_HOST_BASE
-            case "$real_lf" in
-                "${NFS_HOST_BASE}/"*) resident="true" ;;
-                *)                   resident="false" ;;
-            esac
+            age_days=$(( age_sec / 86400 ))
+        else
+            resident="false"
+            age_days=-1
         fi
-        row=$(printf '%s' "$row" | jq -c --argjson r "$resident" '. + {resident: $r}')
+        # Rimuove log_mtime (campo interno) e aggiunge resident + log_age_days
+        row=$(printf '%s' "$row" \
+            | jq -c --argjson r "$resident" --argjson a "$age_days" \
+                'del(.log_mtime) | . + {resident: $r, log_age_days: $a}')
         [ "$first_item" = "1" ] && DATA_NEW="${DATA_NEW}${row}" || DATA_NEW="${DATA_NEW},${row}"
         first_item=0
     done < <(printf '%s\n' "$DATA" | jq -c '.[]' 2>/dev/null)
