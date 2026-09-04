@@ -53,8 +53,13 @@ if [ ! -d "$NFS_HOST_BASE" ]; then
     exit 1
 fi
 
-# Raccoglie {instance_name, volume, alert_log_path} deduplicando per instance_name
-# Per duplicati: prende il volume con l'alert log più recente (ls -t)
+# BUG-06: aggiunto campo resident (bool).
+# resident=true  → il volume NFS contiene un alert log reale per questa istanza.
+#                  Indica che l'istanza è fisica su questo host (o almeno il suo log è qui).
+# resident=false → la directory istanza esiste nel mount NFS ma il log è assente:
+#                  l'istanza è visibile via NFS (struttura RAC/symlink) ma non risiede qui.
+# Zero SSH: la verifica usa solo test -f sul mount NFS locale.
+
 TS=$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")
 
 DATA=$(find "$NFS_HOST_BASE" -mindepth 2 -maxdepth 2 -type d 2>/dev/null \
@@ -65,7 +70,7 @@ DATA=$(find "$NFS_HOST_BASE" -mindepth 2 -maxdepth 2 -type d 2>/dev/null \
     inst     = $NF
     logfile  = base "/" volume "/" inst "/trace/alert_" inst ".log"
     # Tiene traccia delle coppie (inst -> volume,logfile)
-    # In caso di duplicato, preferisce quello già noto (ls -t li ordina per recency nella ricerca)
+    # In caso di duplicato, preferisce quello già noto
     if (!(inst in seen)) {
         seen[inst]    = 1
         volumes[inst] = volume
@@ -78,14 +83,37 @@ END {
     for (i = 1; i <= n; i++) {
         inst = order[i]
         lf   = logs[inst]
-        # verifica esistenza alert log (test -f non disponibile in awk, usiamo il path diretto)
-        printf "%s{\"instance_name\":\"%s\",\"volume\":\"%s\",\"alert_log_path\":\"%s\"}",
+        printf "%s{\"instance_name\":\"%s\",\"volume\":\"%s\",\"alert_log_path\":\"%s\",\"log_exists\":\"CHECK\"}",
             (i > 1 ? "," : ""), inst, volumes[inst], lf
     }
     printf "]"
 }
 ')
 
-printf '{"tool":"%s","generated_at":"%s","environment":"%s","hostname":"%s","instance_name":null,"oracle_version":null,"status":"ok","data":%s,"error":null}\n' \
+# Sostituisce "log_exists":"CHECK" con resident:true/false controllando il filesystem
+# Awk inline non può fare test -f → post-processing in bash con jq + loop
+if command -v jq >/dev/null 2>&1; then
+    DATA=$(printf '%s\n' "$DATA" | jq -c \
+        '[.[] | . + {"resident": (if .alert_log_path != "" then true else false end)} | del(.log_exists)]' \
+        2>/dev/null) || true
+    # Verifica effettiva esistenza file per ogni record
+    DATA_NEW="["
+    first_item=1
+    while IFS= read -r row; do
+        lf=$(printf '%s' "$row" | jq -r '.alert_log_path // ""')
+        if [ -f "$lf" ]; then
+            resident="true"
+        else
+            resident="false"
+        fi
+        row=$(printf '%s' "$row" | jq -c --argjson r "$resident" '. + {resident: $r}')
+        [ "$first_item" = "1" ] && DATA_NEW="${DATA_NEW}${row}" || DATA_NEW="${DATA_NEW},${row}"
+        first_item=0
+    done < <(printf '%s\n' "$DATA" | jq -c '.[]' 2>/dev/null)
+    DATA_NEW="${DATA_NEW}]"
+    DATA="$DATA_NEW"
+fi
+
+printf '{"tool":"%s","generated_at":"%s","environment":"%s","hostname":"%s","instance_name":null,"oracle_version":"n/a","status":"ok","data":%s,"error":null}\n' \
     "$TOOL" "$TS" "$ENV" "$HOST" "$DATA"
 exit 0

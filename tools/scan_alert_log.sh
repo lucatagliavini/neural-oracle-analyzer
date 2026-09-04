@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tools/scan_alert_log.sh — scansiona l'alert log Oracle cercando errori ORA-
 #
-# Uso: scan_alert_log.sh ENVIRONMENT HOSTNAME INSTANCE_NAME [--code=ORA-XXXXX] [--since=YYYY-MM-DD] [--pdb=NAME]
+# Uso: scan_alert_log.sh ENVIRONMENT HOSTNAME INSTANCE_NAME [--code=ORA-XXXXX] [--since=YYYY-MM-DD] [--until=YYYY-MM-DD] [--pdb=NAME]
 #
 # Output JSON:
 #   data: array di oggetti {code, pdb_name, description, category, severity, count, first_seen, last_seen, samples[]}
@@ -10,6 +10,7 @@
 #             (riga senza prefisso "PDBNAME(con_id):")
 #   Se --code= specificato: filtra solo quel codice ORA-.
 #   Se --since= specificato: considera solo righe dal timestamp >= YYYY-MM-DD.
+#   Se --until= specificato: considera solo righe dal timestamp <= YYYY-MM-DD.
 #   Se --pdb= specificato: filtra solo gli errori del PDB indicato (case-insensitive).
 #             Usare --pdb=CDB per vedere solo gli errori del container root (pdb_name null).
 #
@@ -44,11 +45,13 @@ INST="${3:-}"
 # Filtri opzionali
 FILTER_CODE=""
 FILTER_SINCE=""
+FILTER_UNTIL=""
 FILTER_PDB=""
 for arg in "${@:4}"; do
     case "$arg" in
         --code=*)   FILTER_CODE="${arg#--code=}"  ;;
         --since=*)  FILTER_SINCE="${arg#--since=}" ;;
+        --until=*)  FILTER_UNTIL="${arg#--until=}" ;;
         --pdb=*)    FILTER_PDB="${arg#--pdb=}"    ;;
     esac
 done
@@ -69,6 +72,18 @@ if [ -n "$FILTER_SINCE" ] && ! echo "$FILTER_SINCE" | grep -qE '^[0-9]{4}-[0-9]{
     build_error_json "$TOOL" "$ENV" "$HOST" "$INST" \
         "invalid_argument" "--since deve essere nel formato YYYY-MM-DD" \
         "{\"param\":\"since\",\"received\":\"$FILTER_SINCE\"}"
+    exit 2
+fi
+if [ -n "$FILTER_UNTIL" ] && ! echo "$FILTER_UNTIL" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
+    build_error_json "$TOOL" "$ENV" "$HOST" "$INST" \
+        "invalid_argument" "--until deve essere nel formato YYYY-MM-DD" \
+        "{\"param\":\"until\",\"received\":\"$FILTER_UNTIL\"}"
+    exit 2
+fi
+if [ -n "$FILTER_SINCE" ] && [ -n "$FILTER_UNTIL" ] && [ "$FILTER_SINCE" \> "$FILTER_UNTIL" ]; then
+    build_error_json "$TOOL" "$ENV" "$HOST" "$INST" \
+        "invalid_argument" "--since non può essere successivo a --until" \
+        "{\"param\":\"since_until\",\"since\":\"$FILTER_SINCE\",\"until\":\"$FILTER_UNTIL\"}"
     exit 2
 fi
 
@@ -164,6 +179,16 @@ function extract_pdb(line,    m) {
     return ""
 }
 
+# BUG-11: normalizza ORA-N → ORA-NNNNN (zero-padding a 5 cifre).
+# Oracle scrive lo stesso errore in forme diverse (ORA-4036 e ORA-04036);
+# senza normalizzazione vengono raggruppati come codici distinti.
+# La forma originale viene preservata nel primo sample per diagnostica.
+function normalize_code(c,    num) {
+    num = substr(c, 5)
+    while (length(num) < 5) num = "0" num
+    return "ORA-" num
+}
+
 # Riconosce timestamp ISO 8601 stile Oracle alert log:
 #   "2026-09-01T08:16:43.043810+02:00" oppure "2026-09-01 08:16:43.043810"
 # Prende solo la parte YYYY-MM-DDTHH:MM:SS (troncando microsecondi e tz per semplicità)
@@ -190,20 +215,26 @@ function extract_pdb(line,    m) {
         }
     }
 
-    # Trova tutti i codici ORA- sulla riga (≥2 cifre: ORA-0 è success code, non un errore)
+    # Trova tutti i codici ORA- sulla riga (almeno 2 cifre: ORA-0 = success, non errore)
     while (match(line, /ORA-[0-9][0-9]+/)) {
         raw_code = substr(line, RSTART, RLENGTH)
         line = substr(line, RSTART + RLENGTH)
 
-        # Filtro per codice specifico
-        if (filter_code != "" && raw_code != filter_code) continue
+        # BUG-11: normalizza subito a 5 cifre prima del filtro e del raggruppamento.
+        # raw_code viene conservato nel sample ma non nella chiave.
+        norm_code = normalize_code(raw_code)
 
-        # Filtro per data
+        # Filtro per codice specifico: confronta entrambe le forme per compatibilita
+        # (--code=ORA-04036 deve trovare anche le righe che scrivono ORA-4036)
+        if (filter_code != "" && norm_code != normalize_code(filter_code)) continue
+
+        # Filtro per data (since e until)
         if (filter_since != "" && last_ts != "" && last_ts < filter_since) continue
+        if (filter_until != "" && last_ts != "" && last_ts > filter_until "T99") continue
 
-        # Chiave composita: codice + pdb (lo stesso codice da CDB root e da un PDB
-        # sono occorrenze distinte)
-        key = raw_code SUBSEP pdb
+        # Chiave composita: codice normalizzato + pdb (lo stesso codice da CDB root e
+        # da un PDB sono occorrenze distinte)
+        key = norm_code SUBSEP pdb
 
         # Prima occorrenza per questa coppia (code, pdb)
         if (!(key in counts)) {
@@ -248,6 +279,7 @@ if [ "$AWK_PREFILTER" = "1" ]; then
     scan_output=$(LC_ALL=C awk \
         -v filter_code="$FILTER_CODE" \
         -v filter_since="$FILTER_SINCE" \
+        -v filter_until="$FILTER_UNTIL" \
         -v filter_pdb="$FILTER_PDB" \
         -f "${AWK_LIB}" \
         -f "$_awk_tmp" \
@@ -256,6 +288,7 @@ else
     scan_output=$(LC_ALL=C awk \
         -v filter_code="$FILTER_CODE" \
         -v filter_since="$FILTER_SINCE" \
+        -v filter_until="$FILTER_UNTIL" \
         -v filter_pdb="$FILTER_PDB" \
         -f "${AWK_LIB}" \
         -f "$_awk_tmp" \
@@ -348,4 +381,40 @@ END {
 }
 ')
 
-build_envelope "$TOOL" "$ENV" "$HOST" "$INST" "null" "ok" "$data_json" "null"
+# --- BUG-04: segnalazione full scan ------------------------------------------
+# full_scan_performed=true quando non c'è filtro --since (o log è 11g puro).
+# Permette al chiamante di sapere se la chiamata ha letto l'intero file.
+if [ "$AWK_PREFILTER" = "1" ]; then
+    FULL_SCAN="false"
+else
+    FULL_SCAN="true"
+fi
+
+# --- BUG-05: rilevamento log non ruotato -------------------------------------
+# Aggiunge log_start_date (prima riga ISO del file) all'envelope.
+# Il chiamante può confrontarlo con startup_time di identify_instance:
+# se log_start_date << startup_time, il log contiene eventi di incarnazioni passate.
+# Strategia: grep -m1 sul file è istantaneo anche su 400 MB (si ferma alla prima hit).
+# Eseguito solo se FILTER_SINCE non è impostato (altrimenti stiamo già in una finestra).
+LOG_START_DATE="null"
+if [ -z "$FILTER_SINCE" ]; then
+    _first_iso=$(LC_ALL=C grep -m1 -oE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' \
+        "$LOG_PATH" 2>/dev/null | head -1)
+    if [ -n "$_first_iso" ]; then
+        LOG_START_DATE="\"${_first_iso}\""
+    fi
+fi
+
+# Valore JSON per filter_until (null se non impostato)
+FILTER_UNTIL_JSON="null"
+if [ -n "$FILTER_UNTIL" ]; then
+    FILTER_UNTIL_JSON="\"${FILTER_UNTIL}\""
+fi
+
+# Costruisce envelope con campi extra top-level (fuori da data[]):
+#   log_start_date      — prima data ISO nel log (BUG-05)
+#   full_scan_performed — se è stato letto l'intero file (BUG-04)
+#   filter_until        — valore del filtro --until usato, per trasparenza
+_envelope_base=$(build_envelope "$TOOL" "$ENV" "$HOST" "$INST" "n/a" "ok" "$data_json" "null")
+printf '%s\n' "$_envelope_base" \
+    | sed "s/}$/,\"log_start_date\":${LOG_START_DATE},\"full_scan_performed\":${FULL_SCAN},\"filter_until\":${FILTER_UNTIL_JSON}}/"

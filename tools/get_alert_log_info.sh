@@ -50,6 +50,6 @@ TS=$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")
 
 DATA="[{\"path\":\"${LOG_PATH}\",\"size_bytes\":${SIZE},\"last_modified\":\"${MTIME_ISO}\",\"age_hours\":${AGE_HOURS}}]"
 
-printf '{"tool":"%s","generated_at":"%s","environment":"%s","hostname":"%s","instance_name":"%s","oracle_version":null,"status":"ok","data":%s,"error":null}\n' \
+printf '{"tool":"%s","generated_at":"%s","environment":"%s","hostname":"%s","instance_name":"%s","oracle_version":"n/a","status":"ok","data":%s,"error":null}\n' \
     "$TOOL" "$TS" "$ENV" "$HOST" "$INST" "$DATA"
 exit 0

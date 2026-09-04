@@ -320,6 +320,178 @@ test_top_pga_limit() {
     fi
 }
 
+# --- Test: pga_by_pdb_session --limit (BUG-01) ---------------------------------
+
+test_pga_pdb_session_limit() {
+    local script="$1"
+    printf "\n  [pga_by_pdb_session --limit=0 → invalid_argument]\n"
+    local out rc=0
+    out=$("$script" "TEST" "axnporadb41" "NP41CDB0" "--limit=0" 2>/dev/null) || rc=$?
+    if [ "$rc" = "2" ] || ([ "$rc" = "1" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1); then
+        _ok "--limit=0 → invalid_argument"
+    else
+        _fail "--limit=0 non ha restituito invalid_argument (rc=$rc)"
+    fi
+
+    printf "  [pga_by_pdb_session --limit=abc → invalid_argument]\n"
+    rc=0
+    out=$("$script" "TEST" "axnporadb41" "NP41CDB0" "--limit=abc" 2>/dev/null) || rc=$?
+    if [ "$rc" = "2" ] || ([ "$rc" = "1" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1); then
+        _ok "--limit=abc → invalid_argument"
+    else
+        _fail "--limit=abc non ha restituito invalid_argument (rc=$rc)"
+    fi
+}
+
+# --- Test: scan_alert_log --code normalizzazione (BUG-11) + --until (C3) ------
+
+test_scan_alert_log_params() {
+    local script="$1"
+    printf "\n  [scan_alert_log --code=ORA-123 valido]\n"
+    local out rc=0
+    # Deve accettare ORA-N senza zero padding (validazione formato ORA-[0-9]+)
+    out=$("$script" "TEST" "axnporadb41" "NP41CDB0" "--code=ORA-4036" 2>/dev/null) || rc=$?
+    # Senza NFS/connessione, atteso log_not_found o connection_failed — non invalid_argument
+    if [ "$rc" = "2" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1; then
+        _fail "--code=ORA-4036 (senza zero-pad) rifiutato come invalid_argument"
+    else
+        _ok "--code=ORA-4036 (senza zero-pad) accettato dalla validazione"
+    fi
+
+    printf "  [scan_alert_log --code=ORA-abc → invalid_argument]\n"
+    rc=0
+    out=$("$script" "TEST" "axnporadb41" "NP41CDB0" "--code=ORA-abc" 2>/dev/null) || rc=$?
+    if [ "$rc" = "2" ] || ([ "$rc" = "1" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1); then
+        _ok "--code=ORA-abc → invalid_argument"
+    else
+        _fail "--code=ORA-abc non ha restituito invalid_argument (rc=$rc)"
+    fi
+
+    # C3: --until formato invalido → invalid_argument
+    printf "  [scan_alert_log --until=abc → invalid_argument]\n"
+    rc=0
+    out=$("$script" "TEST" "axnporadb41" "NP41CDB0" "--until=not-a-date" 2>/dev/null) || rc=$?
+    if [ "$rc" = "2" ] || ([ "$rc" = "1" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1); then
+        _ok "--until=not-a-date → invalid_argument"
+    else
+        _fail "--until=not-a-date non ha restituito invalid_argument (rc=$rc)"
+    fi
+
+    # C3: --since > --until → invalid_argument
+    printf "  [scan_alert_log --since=2026-09-01 --until=2026-08-01 → invalid_argument]\n"
+    rc=0
+    out=$("$script" "TEST" "axnporadb41" "NP41CDB0" "--since=2026-09-01" "--until=2026-08-01" 2>/dev/null) || rc=$?
+    if [ "$rc" = "2" ] || ([ "$rc" = "1" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1); then
+        _ok "--since > --until → invalid_argument"
+    else
+        _fail "--since > --until non ha restituito invalid_argument (rc=$rc)"
+    fi
+
+    # C3: --since + --until validi → accettati (richiede NFS ma non deve dare invalid_argument)
+    printf "  [scan_alert_log --since=2026-07-21 --until=2026-07-21 valido]\n"
+    rc=0
+    out=$("$script" "TEST" "axnporadb41" "NP41CDB0" "--since=2026-07-21" "--until=2026-07-21" 2>/dev/null) || rc=$?
+    if [ "$rc" = "2" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1; then
+        _fail "--since=2026-07-21 --until=2026-07-21 rifiutato come invalid_argument"
+    else
+        _ok "--since=2026-07-21 --until=2026-07-21 accettato dalla validazione"
+    fi
+}
+
+# --- Test: --until validazione input (quick, no NFS) --------------------------
+# Separata da test_scan_alert_log_params per essere invocabile anche in --quick
+
+test_scan_alert_log_until_quick() {
+    local script="$1"
+    printf "\n  [scan_alert_log --until: validazione formato]\n"
+    local out rc=0
+
+    out=$("$script" "TEST" "axnporadb41" "NP41CDB0" "--until=not-a-date" 2>/dev/null) || rc=$?
+    if [ "$rc" = "2" ] || ([ "$rc" = "1" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1); then
+        _ok "--until formato invalido → invalid_argument"
+    else
+        _fail "--until formato invalido non ha restituito invalid_argument (rc=$rc)"
+    fi
+
+    rc=0
+    out=$("$script" "TEST" "axnporadb41" "NP41CDB0" "--since=2026-09-01" "--until=2026-08-01" 2>/dev/null) || rc=$?
+    if [ "$rc" = "2" ] || ([ "$rc" = "1" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1); then
+        _ok "--since > --until → invalid_argument"
+    else
+        _fail "--since > --until non ha restituito invalid_argument (rc=$rc)"
+    fi
+}
+
+# --- Test: ora_errors.json contiene i codici critici (BUG-10) -----------------
+
+test_ora_errors_coverage() {
+    local script="$1"
+    printf "\n  [ora_errors.json copertura codici critici]\n"
+    local errors_file
+    errors_file="$(cd "$(dirname "$script")/.." && pwd)/data/ora_errors.json"
+    if [ ! -f "$errors_file" ]; then
+        _skip "ora_errors.json non trovato: $errors_file"
+        return
+    fi
+    for code in "ORA-00020" "ORA-04036" "ORA-01692" "ORA-03136" "ORA-01119" "ORA-48113"; do
+        if jq -e --arg c "$code" '.[] | select(.code == $c)' "$errors_file" >/dev/null 2>&1; then
+            _ok "ora_errors.json: $code presente"
+        else
+            _fail "ora_errors.json: $code MANCANTE"
+        fi
+    done
+    # Verifica che ORA-00020 e ORA-04036 abbiano severity critical
+    for code in "ORA-00020" "ORA-04036"; do
+        sev=$(jq -r --arg c "$code" '.[] | select(.code == $c) | .severity' "$errors_file" 2>/dev/null | head -1)
+        if [ "$sev" = "critical" ]; then
+            _ok "ora_errors.json: $code severity=critical"
+        else
+            _fail "ora_errors.json: $code severity='$sev' (atteso critical)"
+        fi
+    done
+}
+
+# --- Test: oracle_version "n/a" nei tool NFS (BUG-07) -------------------------
+
+test_nfs_tool_oracle_version() {
+    local script="$1" tool_name="$2" arg3="${3:-}"
+    printf "\n  [%s: oracle_version = n/a nei tool NFS]\n" "$tool_name"
+    # Usiamo un host fake: il tool fallirà (log_not_found o error) ma l'envelope
+    # deve avere oracle_version = "n/a" anche in caso di successo.
+    # Test su un errore atteso: verifica che oracle_version non sia null.
+    # Per i tool env_only non possiamo testare facilmente senza NFS reale — skip.
+    _skip "oracle_version=n/a: verificabile solo su fixture reale (NFS necessario)"
+}
+
+# --- Test: fra_configured in check_fra_usage (BUG-02) -------------------------
+
+test_fra_configured_field() {
+    local script="$1"
+    printf "\n  [check_fra_usage: fixture verifica fra_configured]\n"
+    local fixture="${FIXTURES_DIR}/check_fra_usage.ok.json"
+    [ -f "$fixture" ] || { _skip "fixture check_fra_usage non disponibile"; return; }
+    local env host inst
+    env=$(grep  "^#ENV="  "$fixture" | cut -d= -f2 | head -1)
+    host=$(grep "^#HOST=" "$fixture" | cut -d= -f2 | head -1)
+    inst=$(grep "^#INST=" "$fixture" | cut -d= -f2 | head -1)
+    local out rc=0
+    out=$("$script" "$env" "$host" "$inst" 2>/dev/null) || rc=$?
+    if [ "$rc" = "0" ] && _is_valid_json "$out"; then
+        if printf '%s' "$out" | jq -e '[.data[] | select(.source == "fra_status")] | length > 0' >/dev/null 2>&1; then
+            _ok "check_fra_usage: sezione fra_status presente"
+        else
+            _fail "check_fra_usage: sezione fra_status MANCANTE"
+        fi
+        if printf '%s' "$out" | jq -e '[.data[] | select(.source == "fra_status")][0] | has("fra_configured")' >/dev/null 2>&1; then
+            _ok "check_fra_usage: fra_configured presente"
+        else
+            _fail "check_fra_usage: fra_configured MANCANTE"
+        fi
+    else
+        _skip "check_fra_usage fixture non eseguibile (rc=$rc)"
+    fi
+}
+
 # --- Test: parametri opzionali tool OS ----------------------------------------
 
 test_os_tool_params() {
@@ -372,6 +544,12 @@ run_test() {
     # Test input invalidi (non richiedono connessione)
     test_invalid_inputs "$script" "$tool_name" "$host_only" "$env_only"
 
+    # Test ora_errors.json + --until (C3) — no connessione, eseguiti anche in --quick
+    if [ "$tool_name" = "scan_alert_log" ]; then
+        test_ora_errors_coverage "$script"
+        test_scan_alert_log_until_quick "$script"
+    fi
+
     if [ "$QUICK" = "0" ]; then
         # Test host inesistente / NFS assente
         case "$tool_name" in
@@ -399,6 +577,16 @@ run_test() {
         case "$tool_name" in
             top_pga_sessions)
                 test_top_pga_limit "$script"
+                ;;
+            pga_by_pdb_session)
+                test_pga_pdb_session_limit "$script"
+                ;;
+            scan_alert_log)
+                test_scan_alert_log_params "$script"
+                test_ora_errors_coverage "$script"
+                ;;
+            check_fra_usage)
+                test_fra_configured_field "$script"
                 ;;
             os_cpu_stats|os_memory_stats|os_disk_stats|os_network_stats)
                 test_os_tool_params "$script" "$tool_name"

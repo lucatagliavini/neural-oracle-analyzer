@@ -97,4 +97,4 @@ data_json=$(tail -n "$LINES" "$LOG_PATH" | LC_ALL=C awk \
     -f "$_awk_tmp")
 rm -f "$_awk_tmp"
 
-build_envelope "$TOOL" "$ENV" "$HOST" "$INST" "null" "ok" "$data_json" "null"
+build_envelope "$TOOL" "$ENV" "$HOST" "$INST" "n/a" "ok" "$data_json" "null"

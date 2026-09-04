@@ -52,7 +52,7 @@ HOSTS=$(find "$NFS_BASE" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | xa
 if [ -z "$HOSTS" ]; then
     # Mount presente ma vuoto
     TS=$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")
-    printf '{"tool":"%s","generated_at":"%s","environment":"%s","hostname":null,"instance_name":null,"oracle_version":null,"status":"ok","data":[],"error":null}\n' \
+    printf '{"tool":"%s","generated_at":"%s","environment":"%s","hostname":null,"instance_name":null,"oracle_version":"n/a","status":"ok","data":[],"error":null}\n' \
         "$TOOL" "$TS" "$ENV"
     exit 0
 fi
@@ -66,6 +66,6 @@ END { printf "]" }
 ')
 
 TS=$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")
-printf '{"tool":"%s","generated_at":"%s","environment":"%s","hostname":null,"instance_name":null,"oracle_version":null,"status":"ok","data":%s,"error":null}\n' \
+printf '{"tool":"%s","generated_at":"%s","environment":"%s","hostname":null,"instance_name":null,"oracle_version":"n/a","status":"ok","data":%s,"error":null}\n' \
     "$TOOL" "$TS" "$ENV" "$DATA"
 exit 0

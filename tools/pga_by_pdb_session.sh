@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tools/pga_by_pdb_session.sh — utilizzo PGA per sessione, raggruppato per PDB
 #
-# Uso: pga_by_pdb_session.sh ENVIRONMENT HOSTNAME INSTANCE_NAME
+# Uso: pga_by_pdb_session.sh ENVIRONMENT HOSTNAME INSTANCE_NAME [--limit=N]
 #
 # Output JSON:
 #   data: array di oggetti {con_id, pdb_name, username, status,
@@ -9,6 +9,11 @@
 #   Ordinato per pga_alloc_mem DESC.
 #   Esclude le sessioni di sistema (username IS NOT NULL).
 #   Richiede Oracle 12c+ (cdb_pdbs non disponibile su 11g).
+#
+# Parametri opzionali:
+#   --limit=N  — numero massimo di sessioni restituite (default: 50)
+#               Coerente con top_pga_sessions (default 20) e tail_alert_log (default 100).
+#               Riduce drasticamente il payload su istanze con molte sessioni attive.
 #
 # Note tecniche:
 #   - cdb_pdbs non esiste su Oracle 11g → unsupported_version
@@ -23,10 +28,25 @@ source "${SCRIPT_DIR}/../lib/oracle_conn.sh"
 ENV="${1:-}"
 HOST="${2:-}"
 INST="${3:-}"
+LIMIT=50
+
+for arg in "${@:4}"; do
+    case "$arg" in
+        --limit=*) LIMIT="${arg#--limit=}" ;;
+    esac
+done
+
+if ! printf '%s' "$LIMIT" | grep -qE '^[0-9]+$' || [ "$LIMIT" -lt 1 ]; then
+    build_error_json "$TOOL" "$ENV" "$HOST" "$INST" \
+        "invalid_argument" "--limit deve essere un intero >= 1" '{"param":"limit"}'
+    exit 2
+fi
 
 validate_args "$TOOL" "$ENV" "$HOST" "$INST" || exit $?
 
 # Unica connessione SSH: versione + dati
+# BUG-01: aggiunto ROWNUM <= N per limitare le righe restituite e ridurre il payload.
+# Su istanze con 1000+ sessioni, senza limite l'output era >100 KB e saturava il context.
 sql_block=$(printf \
 'SET COLSEP ","
 SET FEEDBACK OFF
@@ -40,15 +60,19 @@ PROMPT ORAMARKER
 
 SET HEADING ON
 SET PAGESIZE 9999
-SELECT s.con_id, p.pdb_name, s.username, s.status,
-       pr.pga_used_mem, pr.pga_alloc_mem
-FROM v$session s
-JOIN v$process pr ON pr.addr = s.paddr
-JOIN cdb_pdbs p ON p.con_id = s.con_id
-WHERE s.username IS NOT NULL
-ORDER BY pr.pga_alloc_mem DESC;
+SELECT * FROM (
+  SELECT s.con_id,
+         NVL(p.pdb_name, 'CDB$ROOT') AS pdb_name,
+         s.username, s.status,
+         pr.pga_used_mem, pr.pga_alloc_mem
+  FROM v$session s
+  JOIN v$process pr ON pr.addr = s.paddr
+  LEFT OUTER JOIN cdb_pdbs p ON p.con_id = s.con_id
+  WHERE s.username IS NOT NULL
+  ORDER BY pr.pga_alloc_mem DESC
+) WHERE ROWNUM <= %d;
 EXIT
-')
+' "$LIMIT")
 
 stderr_tmp=$(mktemp)
 raw_output=$(run_sqlplus_raw "$HOST" "$INST" "$sql_block" 2>"$stderr_tmp")

@@ -19,7 +19,7 @@ Tool esposti:
 """
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -93,7 +93,8 @@ def _first(r: dict) -> Optional[dict]:
 # diagnose_instance
 # ---------------------------------------------------------------------------
 
-def diagnose_instance(env: str, host: str, inst: str) -> dict:
+def diagnose_instance(env: str, host: str, inst: str,
+                      include_raw: bool = True) -> dict:
     """Discovery completa di una istanza Oracle.
 
     Esegue in parallelo:
@@ -106,6 +107,9 @@ def diagnose_instance(env: str, host: str, inst: str) -> dict:
       - stato generale dell'istanza
       - PDB aperti/chiusi (se disponibili)
       - eventuali criticità su FRA o limiti di risorsa
+
+    include_raw=False: restituisce solo summary (data=[]).
+    Utile quando il chiamante non ha bisogno del payload grezzo (~50 KB).
     """
     TOOL = "diagnose_instance"
 
@@ -165,19 +169,32 @@ def diagnose_instance(env: str, host: str, inst: str) -> dict:
                 )
 
     # --- Analisi resource limits ---
+    # BUG-08: il denominatore corretto è limit_value (limite configurato),
+    # NON max_utilization (high-water mark storico).
+    # max_utilization viene esposto separatamente come "picco storico".
     resource_criticita = []
     if _ok(res["resources"]):
         for row in _data(res["resources"]):
             name = row.get("resource_name", "")
             current = row.get("current_utilization")
-            limit = row.get("max_utilization") or row.get("limit_value")
+            limit = row.get("limit_value")
+            max_util = row.get("max_utilization")
             try:
-                if limit and int(limit) > 0:
-                    pct = int(current or 0) / int(limit) * 100
+                limit_int = int(limit) if limit is not None else -1
+                if limit_int > 0:
+                    pct = int(current or 0) / limit_int * 100
                     if pct >= 90:
                         resource_criticita.append(
-                            f"{name}: {current}/{limit} ({pct:.0f}%) — vicino al limite"
+                            f"{name}: {current}/{limit} ({pct:.0f}%) — vicino al limite configurato"
                         )
+                    elif max_util is not None:
+                        # Esponi anche il picco storico come metrica di rischio
+                        max_pct = int(max_util) / limit_int * 100
+                        if max_pct >= 85:
+                            resource_criticita.append(
+                                f"{name}: picco storico {max_util}/{limit} ({max_pct:.0f}%) — "
+                                "verificare se il picco recente è ancora attuale"
+                            )
             except (ValueError, TypeError):
                 pass
 
@@ -212,7 +229,7 @@ def diagnose_instance(env: str, host: str, inst: str) -> dict:
         {"sezione": "pdbs",      "result": res["pdbs"]},
         {"sezione": "fra",       "result": res["fra"]},
         {"sezione": "resources", "result": res["resources"]},
-    ]
+    ] if include_raw else []
 
     env_out = _envelope(TOOL, env, host, inst, data, summary)
     env_out["oracle_version"] = oracle_version
@@ -223,7 +240,8 @@ def diagnose_instance(env: str, host: str, inst: str) -> dict:
 # check_memory_pressure
 # ---------------------------------------------------------------------------
 
-def check_memory_pressure(env: str, host: str, inst: str) -> dict:
+def check_memory_pressure(env: str, host: str, inst: str,
+                           include_raw: bool = True) -> dict:
     """Analisi pressione memoria/PGA su una istanza Oracle.
 
     Esegue:
@@ -235,6 +253,9 @@ def check_memory_pressure(env: str, host: str, inst: str) -> dict:
       - sessione con PGA più alta e relativo utente
       - distribuzione della memoria tra PDB
       - valutazione della pressione complessiva
+
+    include_raw=False: restituisce solo summary (data=[]).
+    Riduce drasticamente l'output (~200 KB → ~2 KB) evitando saturazione del context.
     """
     TOOL = "check_memory_pressure"
 
@@ -312,7 +333,7 @@ def check_memory_pressure(env: str, host: str, inst: str) -> dict:
         {"sezione": "top_pga_sessions",  "result": top_res},
         {"sezione": "pga_by_pdb_session","result": par["pga_pdb_sess"]},
         {"sezione": "pga_sga_by_pdb",    "result": par["pga_sga"]},
-    ]
+    ] if include_raw else []
 
     env_out = _envelope(TOOL, env, host, inst, data, summary)
     env_out["oracle_version"] = oracle_version
@@ -325,113 +346,227 @@ def check_memory_pressure(env: str, host: str, inst: str) -> dict:
 
 def runbook_ora04030(env: str, host: str, inst: str,
                      since: Optional[str] = None,
-                     pdb: Optional[str] = None) -> dict:
-    """Runbook completo per la diagnosi di ORA-04030 (out of process memory).
+                     until: Optional[str] = None,
+                     pdb: Optional[str] = None,
+                     include_raw: bool = True) -> dict:
+    """Runbook per la diagnosi di pressione sulla memoria di processo Oracle.
+
+    BUG-14: esteso a coprire tutta la famiglia memory:
+      - ORA-04030: out of process memory (singolo processo)
+      - ORA-04036: PGA memory used by instance exceeds PGA_AGGREGATE_LIMIT (istanza)
+      - ORA-04031: unable to allocate shared memory (SGA/shared pool)
+
+    C3: supporta since+until per isolare un incidente senza sottrazione fra scansioni.
 
     Passi:
-      1. scan_alert_log filtrando ORA-04030 → verifica presenza e frequenza
-      2. Se ORA-04030 presente → check_memory_pressure → analisi PGA
-      3. get_alert_log_info → metadati log (età, dimensione)
+      1. scan_alert_log filtrando ORA-04030, ORA-04036, ORA-04031 in parallelo con log_info e memory_pressure
+      2. get_alert_log_info → metadati log
+      3. check_memory_pressure → analisi PGA attuale
 
     Produce un summary con:
-      - se ORA-04030 è presente, quante occorrenze e in quali PDB
+      - eventi per ciascun codice (04030, 04036, 04031), PDB coinvolti, ultimo evento
       - valutazione della pressione memoria al momento della diagnosi
-      - raccomandazioni operative
+      - raccomandazioni basate sull'insieme delle evidenze (non su un singolo codice)
     """
     TOOL = "runbook_ora04030"
 
-    # Step 1: scan alert log per ORA-04030
-    scan_args = [env, host, inst, "--code=ORA-04030"]
-    if since:
-        scan_args.append(f"--since={since}")
-    if pdb:
-        scan_args.append(f"--pdb={pdb}")
-    scan_res = run_primitive_tool("scan_alert_log", *scan_args)
+    # Step 1: scan alert log per ORA-04030, ORA-04036, ORA-04031 in parallelo
+    # + log_info e memory_pressure — tutti indipendenti
+    def _scan(code: str) -> dict:
+        args = [env, host, inst, f"--code={code}"]
+        if since:
+            args.append(f"--since={since}")
+        if until:
+            args.append(f"--until={until}")
+        if pdb:
+            args.append(f"--pdb={pdb}")
+        return run_primitive_tool("scan_alert_log", *args)
 
-    # Step 2 e 3 in parallelo (indipendenti da step 1)
-    tasks = [
-        ("memory",   "_orchestrated_check_memory_pressure", env, host, inst),
-        ("log_info", "get_alert_log_info",                  env, host, inst),
+    scan_tasks = [
+        ("scan_04030", _scan, "ORA-04030"),
+        ("scan_04036", _scan, "ORA-04036"),
+        ("scan_04031", _scan, "ORA-04031"),
     ]
-    # check_memory_pressure è orchestrato — lo chiamiamo direttamente
-    log_info_res = run_primitive_tool("get_alert_log_info", env, host, inst)
-    memory_res = check_memory_pressure(env, host, inst)
 
-    oracle_version = scan_res.get("oracle_version") or memory_res.get("oracle_version")
+    scan_results: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        fs: dict[Future, str] = {ex.submit(fn, code): label for label, fn, code in scan_tasks}
+        fs[ex.submit(run_primitive_tool, "get_alert_log_info", env, host, inst)] = "log_info"
+        fs[ex.submit(check_memory_pressure, env, host, inst)] = "memory"
+        for future in as_completed(fs):
+            label = fs[future]
+            try:
+                scan_results[label] = future.result()
+            except Exception as exc:
+                scan_results[label] = {
+                    "status": "error", "data": [],
+                    "error": {"code": "query_failed", "message": str(exc)},
+                }
 
-    # --- Analisi ORA-04030 nell'alert log ---
-    ora04030_occurrences = _data(scan_res)
-    totale_eventi = sum(int(r.get("count", 0)) for r in ora04030_occurrences)
-    pdb_coinvolti = [r.get("pdb_name") or "CDB$ROOT" for r in ora04030_occurrences]
-    last_seen = max(
-        (r.get("last_seen", "") for r in ora04030_occurrences),
-        default=None,
-    ) or None
+    scan_04030 = scan_results.get("scan_04030", {})
+    scan_04036 = scan_results.get("scan_04036", {})
+    scan_04031 = scan_results.get("scan_04031", {})
+    log_info_res = scan_results.get("log_info", {})
+    memory_res = scan_results.get("memory", {})
 
-    # --- Log info ---
+    oracle_version = scan_04030.get("oracle_version") or memory_res.get("oracle_version")
+
+    # --- Helper: aggrega eventi da un risultato scan ---
+    def _aggrega(scan_res: dict) -> tuple[int, list[str], Optional[str]]:
+        rows = _data(scan_res)
+        totale = sum(int(r.get("count", 0)) for r in rows)
+        pdbs = [r.get("pdb_name") or "CDB$ROOT" for r in rows]
+        last = max((r.get("last_seen", "") for r in rows), default=None) or None
+        return totale, pdbs, last
+
+    tot_04030, pdbs_04030, last_04030 = _aggrega(scan_04030)
+    tot_04036, pdbs_04036, last_04036 = _aggrega(scan_04036)
+    tot_04031, pdbs_04031, last_04031 = _aggrega(scan_04031)
+    totale_eventi = tot_04030 + tot_04036 + tot_04031
+
+    # --- Log info e metadati ---
     log_row = _first(log_info_res)
     age_hours = log_row.get("age_hours") if log_row else None
 
-    # --- Costruzione raccomandazioni ---
-    raccomandazioni = []
+    # BUG-05: log_start_date è un campo extra aggiunto da scan_alert_log
+    # (non fa parte del data[], sta nell'envelope top-level).
+    # Se log_start_date è presente e precede lo startup_time dell'istanza,
+    # il log contiene eventi di incarnazioni precedenti — segnalarlo.
+    log_start_date = scan_04030.get("log_start_date")
+    memory_instance = memory_res.get("summary", {})
+    # startup_time non è nel summary di check_memory_pressure — non disponibile qui
+    # Usiamo log_start_date come avviso senza confronto startup_time
+
+    # --- Pressione memoria attuale ---
     memory_summary = memory_res.get("summary", {})
     livello = memory_summary.get("livello_pressione", "sconosciuto")
 
-    if totale_eventi == 0:
-        presenza = "ORA-04030 non trovato nell'alert log nel periodo analizzato."
-        if since:
-            presenza += f" (filtro: dal {since})"
+    # --- Costruzione presenza/eventi ---
+    eventi_per_codice = []
+    if tot_04030 > 0:
+        eventi_per_codice.append(
+            f"ORA-04030 × {tot_04030} (out of process memory) — "
+            f"PDB: {', '.join(sorted(set(pdbs_04030)))} — ultimo: {last_04030}"
+        )
+    if tot_04036 > 0:
+        eventi_per_codice.append(
+            f"ORA-04036 × {tot_04036} (PGA_AGGREGATE_LIMIT superato) — "
+            f"PDB: {', '.join(sorted(set(pdbs_04036)))} — ultimo: {last_04036}"
+        )
+    if tot_04031 > 0:
+        eventi_per_codice.append(
+            f"ORA-04031 × {tot_04031} (unable to allocate shared memory/SGA) — "
+            f"PDB: {', '.join(sorted(set(pdbs_04031)))} — ultimo: {last_04031}"
+        )
+
+    if since:
+        periodo_msg = f" (filtro: dal {since})"
     else:
+        periodo_msg = ""
+
+    if not eventi_per_codice:
         presenza = (
-            f"ORA-04030 rilevato {totale_eventi} volta/e, "
-            f"ultimo evento: {last_seen}, "
-            f"PDB coinvolti: {', '.join(set(pdb_coinvolti))}."
+            f"Nessun errore di memoria di processo trovato nell'alert log{periodo_msg}. "
+            "Codici cercati: ORA-04030, ORA-04036, ORA-04031."
         )
+    else:
+        presenza = f"Errori di memoria trovati nell'alert log{periodo_msg}: " + "; ".join(eventi_per_codice)
+
+    # --- Costruzione raccomandazioni ---
+    # BUG-14: non emettere mai "nessuna azione" basandosi sull'assenza di un singolo codice.
+    # Le raccomandazioni si basano sull'insieme delle evidenze.
+    raccomandazioni = []
+
+    if tot_04036 > 0:
         raccomandazioni.append(
-            "Verificare i parametri PGA_AGGREGATE_TARGET e MEMORY_TARGET — "
-            "ORA-04030 indica che un processo Oracle non riesce ad allocare memoria."
+            f"ORA-04036 rilevato {tot_04036} volta/e: PGA_AGGREGATE_LIMIT superato. "
+            "Verificare il valore attuale con: SELECT name, value FROM v$parameter "
+            "WHERE name IN ('pga_aggregate_limit','pga_aggregate_target'). "
+            "Aumentare PGA_AGGREGATE_LIMIT o ridurre il numero di sessioni concorrenti."
         )
-        if livello == "alta":
-            raccomandazioni.append(
-                "La pressione PGA è attualmente ALTA: agire con priorità. "
-                "Identificare la sessione top con check_memory_pressure e terminare "
-                "le query con consumo anomalo."
-            )
-        elif livello == "media":
-            raccomandazioni.append(
-                "La pressione PGA è MEDIA: monitorare. "
-                "Valutare incremento di PGA_AGGREGATE_TARGET se gli eventi si ripetono."
-            )
-        else:
-            raccomandazioni.append(
-                "La pressione PGA è attualmente BASSA: l'evento potrebbe essere transitorio. "
-                "Verificare se il picco era legato a una query specifica (controllare i campioni nell'alert log)."
-            )
-        if pdb_coinvolti and any(p != "CDB$ROOT" for p in pdb_coinvolti):
-            pdb_unici = list({p for p in pdb_coinvolti if p != "CDB$ROOT"})
-            raccomandazioni.append(
-                f"I PDB {', '.join(pdb_unici)} hanno generato errori ORA-04030: "
-                "verificare i limiti di memoria assegnati a ciascun PDB."
-            )
+    if tot_04030 > 0:
+        raccomandazioni.append(
+            f"ORA-04030 rilevato {tot_04030} volta/e: un processo Oracle non riusciva "
+            "ad allocare memoria. Verificare PGA_AGGREGATE_TARGET e top_pga_sessions."
+        )
+    if tot_04031 > 0:
+        raccomandazioni.append(
+            f"ORA-04031 rilevato {tot_04031} volta/e: shared pool o SGA insufficienti. "
+            "Aumentare SHARED_POOL_SIZE o SGA_TARGET."
+        )
+
+    if livello == "alta" and totale_eventi > 0:
+        raccomandazioni.append(
+            "La pressione PGA è attualmente ALTA: agire con priorità. "
+            "Identificare le sessioni più costose con check_memory_pressure e terminare "
+            "le query con consumo anomalo."
+        )
+    elif livello == "media" and totale_eventi > 0:
+        raccomandazioni.append(
+            "La pressione PGA è MEDIA: monitorare. "
+            "Valutare incremento di PGA_AGGREGATE_TARGET se gli eventi si ripetono."
+        )
+    elif livello == "alta" and totale_eventi == 0:
+        raccomandazioni.append(
+            "La pressione PGA è attualmente ALTA anche senza errori recenti: "
+            "rischio di ORA-04036 a breve. Eseguire check_memory_pressure."
+        )
+
+    # Identifica PDB ricorrenti in tutti i codici
+    tutti_pdb = set(pdbs_04030 + pdbs_04036 + pdbs_04031) - {"CDB$ROOT"}
+    if tutti_pdb and totale_eventi > 0:
+        raccomandazioni.append(
+            f"PDB coinvolti: {', '.join(sorted(tutti_pdb))}. "
+            "Verificare i limiti di memoria e il numero di sessioni attive per ciascun PDB."
+        )
 
     if not raccomandazioni:
-        raccomandazioni.append("Nessuna azione immediata richiesta.")
+        # Emetti solo un'osservazione, non una rassicurazione assoluta
+        raccomandazioni.append(
+            "Nessun errore di memoria di processo trovato nel periodo analizzato. "
+            "Per maggiore certezza usare check_memory_pressure per verificare lo stato attuale."
+        )
+
+    last_seen_any = max(
+        (d for d in [last_04030, last_04036, last_04031] if d),
+        default=None,
+    )
+
+    # Avviso log non ruotato: se log_start_date è disponibile e non c'è filtro since,
+    # suggeriamo di usare --since per circoscrivere l'analisi all'incarnazione corrente.
+    if log_start_date and not since:
+        raccomandazioni.append(
+            f"Il log ha eventi dal {log_start_date}: se l'istanza è stata riavviata di recente, "
+            "usare --since=YYYY-MM-DD per circoscrivere l'analisi all'incarnazione corrente "
+            "ed evitare di sommare errori di incarnazioni precedenti."
+        )
 
     summary = {
-        "presenza_ora04030": presenza,
+        "presenza_errori_memoria": presenza,
         "totale_eventi": totale_eventi,
-        "pdb_coinvolti": list(set(pdb_coinvolti)) if totale_eventi > 0 else [],
-        "ultimo_evento": last_seen,
+        "eventi_ora04030": tot_04030,
+        "eventi_ora04036": tot_04036,
+        "eventi_ora04031": tot_04031,
+        "pdb_coinvolti": sorted(set(pdbs_04030 + pdbs_04036 + pdbs_04031)) if totale_eventi > 0 else [],
+        "ultimo_evento": last_seen_any,
         "pressione_memoria_attuale": livello,
         "log_age_hours": age_hours,
+        "log_start_date": log_start_date,
         "raccomandazioni": raccomandazioni,
+        # Compatibilità backward: campo rinominato ma presente
+        "presenza_ora04030": (
+            f"ORA-04030 × {tot_04030}" if tot_04030 > 0
+            else f"ORA-04030 non trovato{periodo_msg}"
+        ),
     }
 
     data = [
-        {"sezione": "scan_alert_log_ora04030", "result": scan_res},
+        {"sezione": "scan_alert_log_ora04030", "result": scan_04030},
+        {"sezione": "scan_alert_log_ora04036", "result": scan_04036},
+        {"sezione": "scan_alert_log_ora04031", "result": scan_04031},
         {"sezione": "check_memory_pressure",   "result": memory_res},
         {"sezione": "get_alert_log_info",       "result": log_info_res},
-    ]
+    ] if include_raw else []
 
     env_out = _envelope(TOOL, env, host, inst, data, summary)
     env_out["oracle_version"] = oracle_version
@@ -443,7 +578,8 @@ def runbook_ora04030(env: str, host: str, inst: str,
 # ---------------------------------------------------------------------------
 
 def diagnose_os_pressure(env: str, host: str, inst: str,
-                          samples: int = 5, interval: int = 2) -> dict:
+                          samples: int = 5, interval: int = 2,
+                          include_raw: bool = True) -> dict:
     """Analisi pressione OS correlata con stato Oracle.
 
     Esegue in parallelo:
@@ -529,17 +665,21 @@ def diagnose_os_pressure(env: str, host: str, inst: str,
                 page_out_avg = float((mem_summary.get("page_out_per_sec") or {}).get("avg") or 0)
 
     # --- Analisi disco OS ---
-    disk_io_await_max = 0.0
+    # BUG-15: usa io_collected (campioni effettivi) non io_available (iostat presente).
+    # disk_io_await_max = None se non ci sono campioni → non genera falso "0.0 ms".
+    disk_io_await_max: Optional[float] = None
     disk_data = {}
     if _ok(res["disk"]):
         disk_data_list = res["disk"].get("data", [])
         disk_data = disk_data_list[0] if isinstance(disk_data_list, list) and disk_data_list else {}
-        if isinstance(disk_data, dict):
+        if isinstance(disk_data, dict) and disk_data.get("io_collected"):
             disk_summary = disk_data.get("summary", {}).get("io", {})
             for dev_stats in disk_summary.values():
-                await_p95 = float((dev_stats.get("await_ms") or {}).get("p95") or 0)
-                if await_p95 > disk_io_await_max:
-                    disk_io_await_max = await_p95
+                await_p95_raw = (dev_stats.get("await_ms") or {}).get("p95")
+                if await_p95_raw is not None:
+                    await_p95 = float(await_p95_raw)
+                    if disk_io_await_max is None or await_p95 > disk_io_await_max:
+                        disk_io_await_max = await_p95
 
     # --- Analisi rete OS ---
     net_rx_errors_total = 0
@@ -560,19 +700,29 @@ def diagnose_os_pressure(env: str, host: str, inst: str,
                 net_tx_drops_total  += int(iface_row.get("tx_drops") or 0)
 
     # --- Analisi Oracle resource limits ---
+    # BUG-08: denominatore = limit_value (limite configurato), non max_utilization.
+    # Esponi anche il picco storico (max_utilization/limit_value) come metrica distinta.
     resource_near_limit = []
     if _ok(res["resources"]):
         for row in _data(res["resources"]):
             name = row.get("resource_name", "")
             current = row.get("current_utilization")
-            limit = row.get("max_utilization") or row.get("limit_value")
+            limit = row.get("limit_value")
+            max_util = row.get("max_utilization")
             try:
-                if limit and int(limit) > 0:
-                    pct = int(current or 0) / int(limit) * 100
+                limit_int = int(limit) if limit is not None else -1
+                if limit_int > 0:
+                    pct = int(current or 0) / limit_int * 100
                     if pct >= 80:
                         resource_near_limit.append(
                             f"{name}: {current}/{limit} ({pct:.0f}%)"
                         )
+                    elif max_util is not None:
+                        max_pct = int(max_util) / limit_int * 100
+                        if max_pct >= 85:
+                            resource_near_limit.append(
+                                f"{name}: picco={max_util}/{limit} ({max_pct:.0f}%) storico"
+                            )
             except (ValueError, TypeError):
                 pass
 
@@ -611,9 +761,9 @@ def diagnose_os_pressure(env: str, host: str, inst: str,
     elif page_out_avg > 1:
         indicatori_gialli.append(f"page-out medio ({page_out_avg:.1f}/s) — attività swap presente")
 
-    if disk_io_await_max > 100:
+    if disk_io_await_max is not None and disk_io_await_max > 100:
         indicatori_rossi.append(f"latenza I/O disco p95 ({disk_io_await_max:.1f}ms) > 100ms")
-    elif disk_io_await_max > 50:
+    elif disk_io_await_max is not None and disk_io_await_max > 50:
         indicatori_gialli.append(f"latenza I/O disco p95 ({disk_io_await_max:.1f}ms) > 50ms")
 
     net_errors_total = net_rx_errors_total + net_tx_errors_total
@@ -660,7 +810,7 @@ def diagnose_os_pressure(env: str, host: str, inst: str,
             "Verificare se i processi Oracle sono in stato D (uninterruptible sleep)."
         )
 
-    if disk_io_await_max > 50 and top_pga_mb >= 512:
+    if disk_io_await_max is not None and disk_io_await_max > 50 and top_pga_mb >= 512:
         correlazioni.append(
             f"Latenza disco p95 {disk_io_await_max:.1f}ms + PGA Oracle elevata ({top_pga_mb:.0f}MB): "
             "probabile I/O da sort/hash su disco. Aumentare PGA_AGGREGATE_TARGET o ottimizzare le query."
@@ -699,7 +849,7 @@ def diagnose_os_pressure(env: str, host: str, inst: str,
             "CPU wait elevato: verificare colli di bottiglia I/O (iostat, check_fra_usage). "
             "Possibile necessità di bilanciare i datafile su più spindle/LUN."
         )
-    if disk_io_await_max > 50:
+    if disk_io_await_max is not None and disk_io_await_max > 50:
         raccomandazioni.append(
             f"Latenza disco elevata ({disk_io_await_max:.1f}ms p95): verificare saturazione storage. "
             "Considerare la distribuzione dei file Oracle su volumi separati."
@@ -733,7 +883,7 @@ def diagnose_os_pressure(env: str, host: str, inst: str,
             "ram_free_pct": round(ram_free_pct, 1),
             "swap_used_pct": round(swap_used_pct, 1),
             "page_out_per_sec_avg": round(page_out_avg, 1),
-            "disk_io_await_p95_ms": round(disk_io_await_max, 1),
+            "disk_io_await_p95_ms": round(disk_io_await_max, 1) if disk_io_await_max is not None else None,
             "net_rx_errors": net_rx_errors_total,
             "net_tx_errors": net_tx_errors_total,
             "net_rx_drops": net_rx_drops_total,
@@ -754,7 +904,7 @@ def diagnose_os_pressure(env: str, host: str, inst: str,
         {"sezione": "check_memory_pressure",  "result": mem_pressure},
         {"sezione": "check_resource_limits",  "result": res["resources"]},
         {"sezione": "sessions_by_user",       "result": res["sessions"]},
-    ]
+    ] if include_raw else []
 
     env_out = _envelope(TOOL, env, host, inst, data, summary)
     env_out["oracle_version"] = oracle_version

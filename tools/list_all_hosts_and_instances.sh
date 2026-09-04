@@ -46,7 +46,7 @@ TS=$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")
 # Raccoglie tutti i path <base>/<host>/<volume>/<instance> e li aggrega
 DATA=$(find "$NFS_BASE" -mindepth 3 -maxdepth 3 -type d 2>/dev/null \
     | sort \
-    | awk -F'/' -v tier="$TIER" '
+    | awk -F'/' -v tier="$TIER" -v base="$NFS_BASE" '
 {
     # path: .../noprod/<host>/<volume>/<instance>
     host = $(NF-2)
@@ -77,7 +77,10 @@ END {
         printf "{\"hostname\":\"%s\",\"tier\":\"%s\",\"instances\":[", host, tier
         for (i = 1; i <= inst_count[host]; i++) {
             if (i > 1) printf ","
-            printf "{\"instance_name\":\"%s\",\"volume\":\"%s\"}", inst_name[host, i], inst_vol[host, i]
+            # BUG-06: aggiunto alert_log_path per permettere verifica resident post-awk
+            lf = base "/" host "/" inst_vol[host, i] "/" inst_name[host, i] "/trace/alert_" inst_name[host, i] ".log"
+            printf "{\"instance_name\":\"%s\",\"volume\":\"%s\",\"alert_log_path\":\"%s\"}",
+                inst_name[host, i], inst_vol[host, i], lf
         }
         printf "]}"
     }
@@ -85,6 +88,6 @@ END {
 }
 ')
 
-printf '{"tool":"%s","generated_at":"%s","environment":"%s","hostname":null,"instance_name":null,"oracle_version":null,"status":"ok","data":%s,"error":null}\n' \
+printf '{"tool":"%s","generated_at":"%s","environment":"%s","hostname":null,"instance_name":null,"oracle_version":"n/a","status":"ok","data":%s,"error":null}\n' \
     "$TOOL" "$TS" "$ENV" "$DATA"
 exit 0

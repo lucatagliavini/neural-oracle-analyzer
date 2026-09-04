@@ -160,8 +160,12 @@ END { printf "]" }
 ')
 
 # --- iostat (opzionale) -------------------------------------------------------
+# BUG-15: distinguere io_available (iostat presente sul sistema) da
+# io_collected (campioni effettivamente raccolti e non vuoti).
+# Le metriche derivate (await_ms) usano null quando io_collected=false.
 
 IO_AVAILABLE="true"
+IO_COLLECTED="false"
 IO_JSON="[]"
 SUMMARY_IO="{}"
 
@@ -182,6 +186,7 @@ else
     }
 
     if [ "$IO_AVAILABLE" = "true" ] && [ -n "$RAW_IO" ]; then
+        IO_COLLECTED="true"
         IO_PARSE=$(printf '%s' "$RAW_IO" | awk \
             -v os_type="$OS_TYPE" -v ts_base="$TS_NOW" '
 BEGIN {
@@ -336,9 +341,11 @@ function percentile(arr,n,p,   idx,frac,lo,hi) {
 fi
 
 # --- Costruzione JSON finale --------------------------------------------------
+# BUG-15: aggiungo io_collected distinto da io_available.
+# io_available=true + io_collected=false = iostat presente ma campioni non ottenuti.
 
-JSON=$(printf '{"os_type":"%s","filesystems":%s,"io_samples":%s,"io_available":%s,"summary":{"io":%s}}' \
-    "$OS_TYPE" "$FS_JSON" "$IO_JSON" "$IO_AVAILABLE" "$SUMMARY_IO")
+JSON=$(printf '{"os_type":"%s","filesystems":%s,"io_samples":%s,"io_available":%s,"io_collected":%s,"summary":{"io":%s}}' \
+    "$OS_TYPE" "$FS_JSON" "$IO_JSON" "$IO_AVAILABLE" "$IO_COLLECTED" "$SUMMARY_IO")
 
 build_envelope "$TOOL" "$ENV" "$HOST" "null" "null" "ok" "[$JSON]" "null"
 exit 0

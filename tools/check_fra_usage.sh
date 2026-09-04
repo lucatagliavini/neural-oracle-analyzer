@@ -4,16 +4,18 @@
 # Uso: check_fra_usage.sh ENVIRONMENT HOSTNAME INSTANCE_NAME
 #
 # Output JSON:
-#   data: array di oggetti di tre tipi distinti, identificati dal campo "source":
-#     source="fra_dest"  → {source, name, space_limit, space_used, space_reclaimable, number_of_files}
-#                          (da v$recovery_file_dest; space_* in bytes)
-#     source="fra_usage" → {source, file_type, percent_space_used, percent_space_reclaimable, number_of_files}
-#                          (da v$flash_recovery_area_usage; solo righe con almeno un file)
-#     source="fra_size"  → {source, name, type, value}
-#                          (da show parameters db_recovery_file_dest*)
+#   data: array di oggetti di quattro tipi distinti, identificati dal campo "source":
+#     source="fra_status" → {source, fra_configured: bool, db_recovery_file_dest, db_recovery_file_dest_size}
+#                           (sempre presente — indica se la FRA è configurata)
+#     source="fra_dest"   → {source, name, space_limit, space_used, space_reclaimable, number_of_files}
+#                           (da v$recovery_file_dest; space_* in bytes; array vuoto se FRA assente)
+#     source="fra_usage"  → {source, file_type, percent_space_used, percent_space_reclaimable, number_of_files}
+#                           (da v$flash_recovery_area_usage; array vuoto se FRA assente)
+#     source="fra_size"   → {source, name, type, value}
+#                           (da v$parameter; sempre presente con i due parametri di configurazione)
 #
-#   Se la FRA non è configurata (db_recovery_file_dest_size=0) le sezioni fra_dest
-#   e fra_usage restano vuote — il tool restituisce comunque status=ok con data parziale.
+#   BUG-02: aggiunto fra_status come prima sezione con fra_configured esplicito,
+#   così il chiamante non deve inferire lo stato dall'assenza di righe.
 #   Funziona su tutte le versioni Oracle (11g, 12c, 19c).
 #
 # Strategia multi-query:
@@ -39,8 +41,9 @@ validate_args "$TOOL" "$ENV" "$HOST" "$INST" || exit $?
 #
 #    Note:
 #    - WHENEVER SQLERROR EXIT 1 precede tutte le query SQL
-#    - "show parameters" non è SQL: non è coperto da WHENEVER, ma non può fallire
-#      su versioni supportate — restituisce al massimo zero righe
+#    - BUG-03+09: "show parameters" wrappava i valori a 30 caratteri e restituiva
+#      space_limit in notazione scientifica; sostituito con query su v$parameter
+#      e CAST su space_limit per garantire valori interi in byte.
 #    - La riga blank dopo ogni PROMPT è obbligatoria (gotcha sqlplus)
 sql_block=$(printf \
 'SET COLSEP ","
@@ -55,7 +58,11 @@ PROMPT MARKER2
 
 SET HEADING ON
 SET PAGESIZE 9999
-SELECT name, space_limit, space_used, space_reclaimable, number_of_files
+SET NUMWIDTH 20
+SELECT name, CAST(space_limit AS NUMBER) AS space_limit,
+       CAST(space_used AS NUMBER) AS space_used,
+       CAST(space_reclaimable AS NUMBER) AS space_reclaimable,
+       number_of_files
 FROM v$recovery_file_dest;
 PROMPT MARKER3
 
@@ -63,7 +70,10 @@ SELECT file_type, percent_space_used, percent_space_reclaimable, number_of_files
 FROM v$flash_recovery_area_usage;
 PROMPT MARKER4
 
-show parameters db_recovery_file_dest
+SELECT name, type, value
+FROM v$parameter
+WHERE name IN ('"'"'db_recovery_file_dest'"'"', '"'"'db_recovery_file_dest_size'"'"')
+ORDER BY name;
 EXIT
 ')
 
@@ -134,9 +144,32 @@ fra_dest=$(_section_to_json  "fra_dest"  "MARKER2" "MARKER3")
 fra_usage=$(_section_to_json "fra_usage" "MARKER3" "MARKER4")
 fra_size=$(_section_to_json  "fra_size"  "MARKER4" "")
 
-# 6. Concatena i tre array in un unico array data[].
-#    Ogni sezione è già un array JSON valido (può essere []); li mergiamo
-#    estraendo il contenuto interno e separandoli con virgola solo se non vuoti.
+# 6. BUG-02: costruisce fra_status — oggetto esplicito con fra_configured bool.
+#    Fra configurata = db_recovery_file_dest non vuoto E dest_size > 0.
+#    I valori dei due parametri vengono estratti dalla sezione fra_size (v$parameter).
+fra_dest_param=$(printf '%s\n' "$fra_size" \
+    | jq -r '[.[] | select(.name == "db_recovery_file_dest")] | first | .value // ""' 2>/dev/null || true)
+fra_size_param=$(printf '%s\n' "$fra_size" \
+    | jq -r '[.[] | select(.name == "db_recovery_file_dest_size")] | first | .value // "0"' 2>/dev/null || true)
+
+# FRA configurata se: dest non vuota E dest_size numerico > 0
+if [ -n "$fra_dest_param" ] && [ "$fra_dest_param" != "" ] \
+   && printf '%s' "$fra_size_param" | grep -qE '^[0-9]+$' \
+   && [ "$fra_size_param" -gt 0 ] 2>/dev/null; then
+    fra_configured="true"
+else
+    fra_configured="false"
+fi
+
+# Escaping JSON per il path (può contenere slash e caratteri speciali)
+fra_dest_json=$(printf '%s' "$fra_dest_param" | sed 's/\\/\\\\/g; s/"/\\"/g')
+fra_size_json=$(printf '%s' "$fra_size_param" | sed 's/\\/\\\\/g; s/"/\\"/g')
+
+fra_status_json="{\"source\":\"fra_status\",\"fra_configured\":${fra_configured},\"db_recovery_file_dest\":\"${fra_dest_json}\",\"db_recovery_file_dest_size\":\"${fra_size_json}\"}"
+
+# 7. Concatena le quattro sezioni in un unico array data[].
+#    fra_status è sempre presente come primo elemento.
+#    Le altre sezioni sono già array JSON validi (possono essere []).
 _merge_arrays() {
     # Estrae il contenuto tra [ e ] di ogni array, filtra gli array vuoti
     awk '
@@ -154,6 +187,7 @@ BEGIN { out = ""; sep = "" }
 }
 END { print "[" out "]" }
 ' << EOF
+$( printf '%s\n' "$fra_status_json" )
 $( printf '%s\n' "$fra_dest"  | tr -d '\n' )
 $( printf '%s\n' "$fra_usage" | tr -d '\n' )
 $( printf '%s\n' "$fra_size"  | tr -d '\n' )

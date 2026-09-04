@@ -275,7 +275,8 @@ TOOL_CATALOG: list[dict] = [
         "description": (
             "MEMORIA — Utilizzo PGA per singola sessione con dettaglio PDB di appartenenza "
             "(join v$session/v$process/cdb_pdbs). Richiede Oracle 12c+. "
-            "Usare per identificare quale sessione/PDB consuma più memoria."
+            "Usare per identificare quale sessione o PDB consuma più memoria. "
+            "Parametro opzionale: limit (default 50)."
         ),
         "params": ["environment", "hostname", "instance_name"],
     },
@@ -548,7 +549,8 @@ MCP_TOOLS: list[dict] = [
             "ANALISI LOG — Scansiona l'alert log Oracle cercando tutti gli errori ORA- "
             "raggruppati per codice e PDB, con conteggio, first/last seen e campioni. "
             "Legge dal mount NFS locale. "
-            "Filtri opzionali: code (es. ORA-04030), since (YYYY-MM-DD), pdb (nome PDB o 'CDB' per il root). "
+            "Filtri opzionali: code (es. ORA-04030), since (YYYY-MM-DD), until (YYYY-MM-DD), pdb (nome PDB o 'CDB' per il root). "
+            "Usare since+until per isolare un incidente specifico senza sottrazione fra scansioni. "
             "Usare per diagnosticare errori ricorrenti o indagare un incidente."
         ),
         "inputSchema": {
@@ -557,6 +559,7 @@ MCP_TOOLS: list[dict] = [
                 **_BASE_PROPS,
                 "code": {"type": "string", "description": "Filtra per codice ORA- (es. ORA-04030)"},
                 "since": {"type": "string", "description": "Considera solo righe dal timestamp >= YYYY-MM-DD"},
+                "until": {"type": "string", "description": "Considera solo righe dal timestamp <= YYYY-MM-DD"},
                 "pdb": {"type": "string", "description": "Filtra per nome PDB (es. AIMELA). Usa 'CDB' per il container root."},
             },
             "required": ["environment", "hostname", "instance_name"],
@@ -667,11 +670,19 @@ MCP_TOOLS: list[dict] = [
         "description": (
             "MEMORIA — Utilizzo PGA per singola sessione con dettaglio PDB di appartenenza "
             "(join v$session/v$process/cdb_pdbs). Richiede Oracle 12c+. "
-            "Usare per identificare quale sessione o PDB consuma più memoria."
+            "Usare per identificare quale sessione o PDB consuma più memoria. "
+            "Parametro opzionale: limit (default 50)."
         ),
         "inputSchema": {
             "type": "object",
-            "properties": _BASE_PROPS,
+            "properties": {
+                **_BASE_PROPS,
+                "limit": {
+                    "type": "integer",
+                    "description": "Numero massimo di sessioni restituite (default: 50)",
+                    "minimum": 1,
+                },
+            },
             "required": ["environment", "hostname", "instance_name"],
         },
     },
@@ -790,11 +801,15 @@ MCP_TOOLS: list[dict] = [
             "eventuali criticità su FRA (spazio) e limiti di risorsa (sessioni/processi), "
             "più i risultati raw di ogni primitivo. "
             "Usare sempre come primo passo quando si analizza un'istanza di cui non si sa lo stato. "
-            "Se si sospetta già un problema specifico (es. ORA-04030) usare il runbook dedicato."
+            "Se si sospetta già un problema specifico (es. ORA-04030) usare il runbook dedicato. "
+            "include_raw=false per ricevere solo il summary (~5 KB invece di ~50 KB)."
         ),
         "inputSchema": {
             "type": "object",
-            "properties": _BASE_PROPS,
+            "properties": {
+                **_BASE_PROPS,
+                "include_raw": {"type": "boolean", "description": "Se false, restituisce solo summary (data=[]). Default: true."},
+            },
             "required": ["environment", "hostname", "instance_name"],
         },
     },
@@ -806,31 +821,40 @@ MCP_TOOLS: list[dict] = [
             "Restituisce: livello_pressione (bassa/media/alta), sessione con più PGA, "
             "distribuzione PGA per PDB, valutazione testuale. "
             "Usare quando si sospetta ORA-04030, query lente per sort su disco, "
-            "o consumo anomalo di memoria nei processi Oracle."
+            "o consumo anomalo di memoria nei processi Oracle. "
+            "include_raw=false per ricevere solo il summary (~2 KB invece di ~200 KB)."
         ),
         "inputSchema": {
             "type": "object",
-            "properties": _BASE_PROPS,
+            "properties": {
+                **_BASE_PROPS,
+                "include_raw": {"type": "boolean", "description": "Se false, restituisce solo summary (data=[]). Default: true."},
+            },
             "required": ["environment", "hostname", "instance_name"],
         },
     },
     {
         "name": "runbook_ora04030",
         "description": (
-            "RUNBOOK — Diagnosi completa per ORA-04030 'out of process memory'. "
-            "Esegue: scan_alert_log (filtra ORA-04030) + check_memory_pressure + get_alert_log_info. "
-            "Restituisce: se l'errore è presente nell'alert log, quante volte, in quali PDB, "
+            "RUNBOOK — Diagnosi completa per pressione memoria di processo Oracle. "
+            "Cerca ORA-04030 (out of process memory), ORA-04036 (PGA_AGGREGATE_LIMIT superato) e "
+            "ORA-04031 (shared memory). Esegue: scan_alert_log × 3 + check_memory_pressure + get_alert_log_info. "
+            "Restituisce: se gli errori sono presenti nell'alert log, quante volte, in quali PDB, "
             "ultimo evento, livello pressione PGA attuale, raccomandazioni operative. "
-            "Usare quando l'utente segnala ORA-04030, processi Oracle che terminano per memoria, "
+            "Usare quando l'utente segnala ORA-04030/04036, processi Oracle che terminano per memoria, "
             "o query che falliscono con errori di allocazione. "
-            "Filtro since utile per circoscrivere a un incidente specifico (es. since='2026-09-01')."
+            "Filtri since+until per circoscrivere a un incidente specifico "
+            "(es. since='2026-07-21', until='2026-07-21'). "
+            "include_raw=false per ricevere solo il summary (~5 KB invece di ~500 KB)."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 **_BASE_PROPS,
                 "since": {"type": "string", "description": "Considera solo errori dal timestamp >= YYYY-MM-DD"},
+                "until": {"type": "string", "description": "Considera solo errori dal timestamp <= YYYY-MM-DD"},
                 "pdb": {"type": "string", "description": "Filtra per nome PDB (es. AIMELA). Usa 'CDB' per il container root."},
+                "include_raw": {"type": "boolean", "description": "Se false, restituisce solo summary (data=[]). Default: true."},
             },
             "required": ["environment", "hostname", "instance_name"],
         },
@@ -848,7 +872,8 @@ MCP_TOOLS: list[dict] = [
             "Impiega circa 10-30s (campionamento OS). "
             "Usare quando il server è lento, le query sono degradate, o si sospetta un problema "
             "di CPU/memoria/disco che impatta Oracle. "
-            "NON usare per problemi puramente Oracle (es. ORA-04030): usare runbook_ora04030."
+            "NON usare per problemi puramente Oracle (es. ORA-04030): usare runbook_ora04030. "
+            "include_raw=false per ricevere solo il summary (~5 KB invece di ~260 KB)."
         ),
         "inputSchema": {
             "type": "object",
@@ -856,6 +881,7 @@ MCP_TOOLS: list[dict] = [
                 **_BASE_PROPS,
                 "samples":  {"type": "integer", "description": "Numero di campioni OS (default: 5)", "minimum": 1},
                 "interval": {"type": "integer", "description": "Secondi tra campioni (default: 2)", "minimum": 0},
+                "include_raw": {"type": "boolean", "description": "Se false, restituisce solo summary (data=[]). Default: true."},
             },
             "required": ["environment", "hostname", "instance_name"],
         },
@@ -997,6 +1023,8 @@ def _dispatch_tool(name: str, args: dict) -> dict:
             extra.append(f"--code={args['code']}")
         if args.get("since"):
             extra.append(f"--since={args['since']}")
+        if args.get("until"):
+            extra.append(f"--until={args['until']}")
         if args.get("pdb"):
             extra.append(f"--pdb={args['pdb']}")
         return run_primitive_tool("scan_alert_log", env, host, inst, *extra)
@@ -1020,7 +1048,10 @@ def _dispatch_tool(name: str, args: dict) -> dict:
         return run_primitive_tool("pga_sga_by_pdb", env, host, inst)
 
     if name == "pga_by_pdb_session":
-        return run_primitive_tool("pga_by_pdb_session", env, host, inst)
+        extra = []
+        if args.get("limit") is not None:
+            extra.append(f"--limit={args['limit']}")
+        return run_primitive_tool("pga_by_pdb_session", env, host, inst, *extra)
 
     if name == "top_pga_sessions":
         extra = []
@@ -1029,16 +1060,20 @@ def _dispatch_tool(name: str, args: dict) -> dict:
         return run_primitive_tool("top_pga_sessions", env, host, inst, *extra)
 
     if name == "diagnose_instance":
-        return diagnose_instance(env, host, inst)
+        return diagnose_instance(env, host, inst,
+                                 include_raw=bool(args.get("include_raw", True)))
 
     if name == "check_memory_pressure":
-        return check_memory_pressure(env, host, inst)
+        return check_memory_pressure(env, host, inst,
+                                     include_raw=bool(args.get("include_raw", True)))
 
     if name == "runbook_ora04030":
         return runbook_ora04030(
             env, host, inst,
             since=args.get("since"),
+            until=args.get("until"),
             pdb=args.get("pdb"),
+            include_raw=bool(args.get("include_raw", True)),
         )
 
     if name in ("os_cpu_stats", "os_memory_stats", "os_disk_stats", "os_network_stats"):
@@ -1058,6 +1093,7 @@ def _dispatch_tool(name: str, args: dict) -> dict:
             env, host, inst,
             samples=int(args.get("samples") or 5),
             interval=int(args.get("interval") or 2),
+            include_raw=bool(args.get("include_raw", True)),
         )
 
     # fallback (non dovrebbe mai arrivare qui grazie al check precedente)
@@ -1243,6 +1279,7 @@ def check_fra_usage(_: AuthDep, req: _BaseRequest) -> dict:
 class ScanAlertLogRequest(_BaseRequest):
     code: Optional[str] = Field(None, description="Filtra per codice ORA- (es. ORA-04030)")
     since: Optional[str] = Field(None, description="Considera solo righe dal timestamp >= YYYY-MM-DD")
+    until: Optional[str] = Field(None, description="Considera solo righe dal timestamp <= YYYY-MM-DD")
     pdb: Optional[str] = Field(None, description="Filtra per PDB (es. AIMELA). Usa 'CDB' per il container root.")
 
 
@@ -1253,6 +1290,8 @@ def scan_alert_log(_: AuthDep, req: ScanAlertLogRequest) -> dict:
         args.append(f"--code={req.code}")
     if req.since:
         args.append(f"--since={req.since}")
+    if req.until:
+        args.append(f"--until={req.until}")
     if req.pdb:
         args.append(f"--pdb={req.pdb}")
     return run_primitive_tool("scan_alert_log", *args)
@@ -1300,9 +1339,16 @@ def pga_sga_by_pdb(_: AuthDep, req: _BaseRequest) -> dict:
     return run_primitive_tool("pga_sga_by_pdb", req.environment, req.hostname, req.instance_name)
 
 
+class PgaByPdbSessionRequest(_BaseRequest):
+    limit: Optional[int] = Field(None, description="Numero massimo di sessioni restituite (default: 50)")
+
+
 @app.post("/tools/pga_by_pdb_session", response_model=ToolResponse, tags=["memory"])
-def pga_by_pdb_session(_: AuthDep, req: _BaseRequest) -> dict:
-    return run_primitive_tool("pga_by_pdb_session", req.environment, req.hostname, req.instance_name)
+def pga_by_pdb_session(_: AuthDep, req: PgaByPdbSessionRequest) -> dict:
+    args = [req.environment, req.hostname, req.instance_name]
+    if req.limit is not None:
+        args.append(f"--limit={req.limit}")
+    return run_primitive_tool("pga_by_pdb_session", *args)
 
 
 class TopPgaSessionsRequest(_BaseRequest):
@@ -1322,19 +1368,35 @@ def top_pga_sessions(_: AuthDep, req: TopPgaSessionsRequest) -> dict:
 # ---------------------------------------------------------------------------
 
 
-class RunbookOra04030Request(_BaseRequest):
+class _IncludeRawMixin(BaseModel):
+    include_raw: bool = Field(True, description="Se false, restituisce solo summary (data=[])")
+
+
+class RunbookOra04030Request(_BaseRequest, _IncludeRawMixin):
     since: Optional[str] = Field(None, description="Considera solo errori dal timestamp >= YYYY-MM-DD")
+    until: Optional[str] = Field(None, description="Considera solo errori dal timestamp <= YYYY-MM-DD")
     pdb: Optional[str] = Field(None, description="Filtra per PDB (es. AIMELA). Usa 'CDB' per il container root.")
 
 
+class _RunbookBaseRequest(_BaseRequest, _IncludeRawMixin):
+    pass
+
+
+class DiagnoseOsPressureRequest(_BaseRequest, _IncludeRawMixin):
+    samples: Optional[int] = Field(None, description="Numero di campioni OS (default: 5)")
+    interval: Optional[int] = Field(None, description="Secondi tra campioni (default: 2)")
+
+
 @app.post("/tools/diagnose_instance", tags=["runbook"])
-def diagnose_instance_endpoint(_: AuthDep, req: _BaseRequest) -> dict:
-    return diagnose_instance(req.environment, req.hostname, req.instance_name)
+def diagnose_instance_endpoint(_: AuthDep, req: _RunbookBaseRequest) -> dict:
+    return diagnose_instance(req.environment, req.hostname, req.instance_name,
+                             include_raw=req.include_raw)
 
 
 @app.post("/tools/check_memory_pressure", tags=["runbook"])
-def check_memory_pressure_endpoint(_: AuthDep, req: _BaseRequest) -> dict:
-    return check_memory_pressure(req.environment, req.hostname, req.instance_name)
+def check_memory_pressure_endpoint(_: AuthDep, req: _RunbookBaseRequest) -> dict:
+    return check_memory_pressure(req.environment, req.hostname, req.instance_name,
+                                 include_raw=req.include_raw)
 
 
 @app.post("/tools/runbook_ora04030", tags=["runbook"])
@@ -1342,5 +1404,17 @@ def runbook_ora04030_endpoint(_: AuthDep, req: RunbookOra04030Request) -> dict:
     return runbook_ora04030(
         req.environment, req.hostname, req.instance_name,
         since=req.since,
+        until=req.until,
         pdb=req.pdb,
+        include_raw=req.include_raw,
+    )
+
+
+@app.post("/tools/diagnose_os_pressure", tags=["runbook"])
+def diagnose_os_pressure_endpoint(_: AuthDep, req: DiagnoseOsPressureRequest) -> dict:
+    return diagnose_os_pressure(
+        req.environment, req.hostname, req.instance_name,
+        samples=req.samples or 5,
+        interval=req.interval or 2,
+        include_raw=req.include_raw,
     )

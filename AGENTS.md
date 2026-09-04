@@ -12,16 +12,16 @@ This file provides guidance to agents when working with code in this repository.
 3. Solo se necessario per la milestone da avviare: leggere il file specs rilevante in [`docs/specs/`](docs/specs/).
 4. Non scrivere codice prima di aver completato i passi 1–2.
 
-**Ultimo file di sessione**: [`docs/sessions/2026-09-09.md`](docs/sessions/2026-09-09.md)
-— Stato: M0–M11 ✅ completate | OS monitoring completo (cpu, mem, disk, network)
-— 26 tool MCP attivi su `lxprworkerlana01:8420` | 53 test --quick bash
-— M11: os_network_stats (AIX netstat -i, Linux /proc/net/dev) + integrazione diagnose_os_pressure
-— Gotcha 30-32: apostrofi awk, netstat -I AIX, dedup righe netstat -i per iface
+**Ultimo file di sessione**: [`docs/sessions/2026-09-11.md`](docs/sessions/2026-09-11.md)
+— Stato: M0–M11 ✅ | Tutti i 15 bug corretti | C2 (include_raw) e C3 (--until) implementati
+— 26 tool MCP attivi su `lxprworkerlana01:8420` | 63 test --quick bash
+— C3: `--until=YYYY-MM-DD` su `scan_alert_log` e `runbook_ora04030`
+— C2: `include_raw` (default true) su `diagnose_instance`, `check_memory_pressure`, `runbook_ora04030`, `diagnose_os_pressure`
 — Proxy HTTP attivo su porta 80 (SSL placeholder commentato)
 
 ## Project state
 
-M0–M11 completate. 22 tool primitivi bash + 4 Python orchestrati attivi su `lxprworkerlana01:8420`. 53 test --quick bash. OS monitoring completo: os_cpu_stats, os_memory_stats, os_disk_stats, os_network_stats + orchestrato diagnose_os_pressure + lib/os_cmd.sh cross-platform AIX/Linux. Proxy HTTP attivo su porta 80 con ProxyTimeout 300.
+M0–M11 completate. Tutti i 15 bug da BUGS-MCP-ORACLE.md corretti. C2 (include_raw) e C3 (--until) implementati. 22 tool primitivi bash + 4 Python orchestrati attivi su `lxprworkerlana01:8420`. 63 test --quick bash. OS monitoring completo: os_cpu_stats, os_memory_stats, os_disk_stats, os_network_stats + orchestrato diagnose_os_pressure + lib/os_cmd.sh cross-platform AIX/Linux. Proxy HTTP attivo su porta 80 con ProxyTimeout 300.
 `docs/specs/` è la fonte autoritativa — leggerla prima di scrivere codice.
 
 ## Goal
