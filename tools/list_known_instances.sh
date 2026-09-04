@@ -61,12 +61,15 @@ if [ ! -d "$NFS_HOST_BASE" ]; then
     exit 1
 fi
 
-# BUG-06: aggiunto campo resident (bool).
-# resident=true  → il volume NFS contiene un alert log reale per questa istanza.
-#                  Indica che l'istanza è fisica su questo host (o almeno il suo log è qui).
-# resident=false → la directory istanza esiste nel mount NFS ma il log è assente:
-#                  l'istanza è visibile via NFS (struttura RAC/symlink) ma non risiede qui.
-# Zero SSH: la verifica usa solo test -f sul mount NFS locale.
+# BUG-06 / R-02: campo resident (bool).
+# resident=true  → l'alert log esiste ed è fisicamente sotto NFS_HOST_BASE
+#                  (path reale con prefisso dell'host, non un symlink verso un altro host).
+# resident=false → la directory istanza è visibile via NFS ma il log è assente o è un
+#                  symlink che punta fuori dall'albero dell'host (struttura RAC).
+#
+# Il test usa `realpath -m` (o `readlink -f` come fallback) per risolvere i symlink:
+# se il path reale ha come prefisso NFS_HOST_BASE, l'istanza è residente su questo host.
+# Zero SSH: solo operazioni locali sul mount NFS.
 
 TS=$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")
 
@@ -98,21 +101,29 @@ END {
 }
 ')
 
-# Sostituisce "log_exists":"CHECK" con resident:true/false controllando il filesystem
-# Awk inline non può fare test -f → post-processing in bash con jq + loop
+# Sostituisce "log_exists":"CHECK" con resident:true/false controllando il filesystem.
+# R-02: resident usa realpath per rilevare symlink verso altri host (struttura RAC).
+# Un log che esiste ma è un symlink che punta fuori da NFS_HOST_BASE → resident=false.
+# Preferisce realpath; fallback a readlink -f se realpath non è disponibile.
 if command -v jq >/dev/null 2>&1; then
-    DATA=$(printf '%s\n' "$DATA" | jq -c \
-        '[.[] | . + {"resident": (if .alert_log_path != "" then true else false end)} | del(.log_exists)]' \
-        2>/dev/null) || true
-    # Verifica effettiva esistenza file per ogni record
+    DATA=$(printf '%s\n' "$DATA" | jq -c '[.[] | del(.log_exists)]' 2>/dev/null) || true
     DATA_NEW="["
     first_item=1
     while IFS= read -r row; do
         lf=$(printf '%s' "$row" | jq -r '.alert_log_path // ""')
+        resident="false"
         if [ -f "$lf" ]; then
-            resident="true"
-        else
-            resident="false"
+            # Risolve il path reale (segue symlink)
+            if command -v realpath >/dev/null 2>&1; then
+                real_lf=$(realpath -m "$lf" 2>/dev/null || printf '%s' "$lf")
+            else
+                real_lf=$(readlink -f "$lf" 2>/dev/null || printf '%s' "$lf")
+            fi
+            # resident=true solo se il path reale è ancora sotto NFS_HOST_BASE
+            case "$real_lf" in
+                "${NFS_HOST_BASE}/"*) resident="true" ;;
+                *)                   resident="false" ;;
+            esac
         fi
         row=$(printf '%s' "$row" | jq -c --argjson r "$resident" '. + {resident: $r}')
         [ "$first_item" = "1" ] && DATA_NEW="${DATA_NEW}${row}" || DATA_NEW="${DATA_NEW},${row}"

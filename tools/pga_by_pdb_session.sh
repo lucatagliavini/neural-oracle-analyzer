@@ -29,6 +29,7 @@ ENV="${1:-}"
 HOST="${2:-}"
 INST="${3:-}"
 LIMIT=50
+MAX_LIMIT=500
 
 for arg in "${@:4}"; do
     case "$arg" in
@@ -39,6 +40,13 @@ done
 if ! printf '%s' "$LIMIT" | grep -qE '^[0-9]+$' || [ "$LIMIT" -lt 1 ]; then
     build_error_json "$TOOL" "$ENV" "$HOST" "$INST" \
         "invalid_argument" "--limit deve essere un intero >= 1" '{"param":"limit"}'
+    exit 2
+fi
+# R3-02: tetto massimo per prevenire payload fuori controllo (coerente con top_pga_sessions).
+if [ "$LIMIT" -gt "$MAX_LIMIT" ]; then
+    build_error_json "$TOOL" "$ENV" "$HOST" "$INST" \
+        "invalid_argument" "--limit non può superare ${MAX_LIMIT}" \
+        "{\"param\":\"limit\",\"max\":${MAX_LIMIT},\"received\":${LIMIT}}"
     exit 2
 fi
 

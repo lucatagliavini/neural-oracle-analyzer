@@ -138,44 +138,36 @@ fi
 
 # --- Pre-filtraggio I/O -------------------------------------------------------
 #
-# Due strategie combinate per ridurre la lettura NFS su file grandi (58-400 MB):
+# Due strategie per ridurre la lettura NFS su file grandi (58-400 MB):
 #
-# STRATEGIA A — --since (già implementata):
+# STRATEGIA A — --since (seek per data):
 #   Usa grep -n per trovare la prima riga con la data richiesta, poi tail -n +N
 #   passa ad awk solo la coda del file. Riduzione tipica: 388 MB → ~20 MB.
+#   full_scan_performed=false.
 #
-# STRATEGIA B — --code senza --since (BUG-04):
-#   Quando è specificato solo --code (senza --since), il file veniva letto
-#   integralmente da awk anche se il codice era assente o rarissimo.
+# STRATEGIA B1 — --code senza --since (fast-exit se codice assente):
+#   grep -c verifica se il codice esiste nel file. Se count=0 → fast-exit
+#   con data:[] senza leggere awk. full_scan_performed=false.
+#   Se count>0 → awk legge il file INTERO con filter_code attivo.
+#   full_scan_performed=true (il file viene letto integralmente).
 #
-#   Fasi:
-#     B1. grep -c verifica se il codice esiste nel file.
-#         Se count=0 → fast-exit con data:[] (nessuna lettura awk).
-#     B2. Se count>0, grep -n raccoglie i numeri di riga delle occorrenze.
-#         awk costruisce un file ridotto con solo le righe rilevanti:
-#         per ogni riga ORA- include la riga precedente (timestamp) + la riga stessa.
-#         Il file ridotto viene passato all'awk principale invece del file intero.
-#
-#   Normalizzazione codice: --code=ORA-04036 deve trovare anche ORA-4036 nel log.
-#   Il grep cerca entrambe le forme (con e senza zero-padding).
-#
-# Prerequisito formato ISO (Oracle 12c+):
-#   "2026-09-01T08:16:43.043810+02:00"
-#   Log 11g puri (formato testuale) → pre-filtraggio saltato, awk legge tutto.
+#   Nota: la Strategia B2 (file ridotto) è stata rimossa (R3-01): estraendo
+#   solo (riga-1, riga) per ogni ORA- si perdeva il timestamp che precede
+#   l'errore di 2 righe, producendo first_seen="unknown"/last_seen=null.
+#   Il B1 da solo elimina il caso peggiore (full scan inutile su codice assente).
 #
 # Casi gestiti:
 #   1. Nessun filtro                          → AWK_PREFILTER=0, awk legge LOG_PATH intero
 #   2. --since, ISO OK, data trovata          → AWK_PREFILTER=1 (tail -n +N)
 #   3. --since, ISO OK, data non trovata      → fast-exit data:[]
 #   4. --since, log 11g puro                  → AWK_PREFILTER=0, fallback intero
-#   5. --code senza --since, codice assente   → fast-exit data:[] (B1)
-#   6. --code senza --since, codice presente  → AWK_PREFILTER=2 (file ridotto) (B2)
+#   5. --code senza --since, codice assente   → AWK_PREFILTER=3, fast-exit data:[] (B1)
+#   6. --code senza --since, codice presente  → AWK_PREFILTER=0, awk legge file intero
 #   7. --code + --since                       → Strategia A ha priorità (tail -n +N)
 #   8. --code + --since + --until             → Strategia A (tail -n +N + filtro until in awk)
 
 AWK_PREFILTER=0
 AWK_SINCE_START_LINE=""
-AWK_CODE_TMPFILE=""   # file temporaneo con righe ridotte per Strategia B
 
 if [ -n "$FILTER_SINCE" ]; then
     # --- Strategia A: pre-filtraggio per --since ---
@@ -198,7 +190,7 @@ if [ -n "$FILTER_SINCE" ]; then
     # Se has_iso=0 (log 11g puro): AWK_PREFILTER rimane 0, awk filtra in-flight come prima.
 
 elif [ -n "$FILTER_CODE" ]; then
-    # --- Strategia B: pre-filtraggio per --code (BUG-04) ---
+    # --- Strategia B1: fast-exit se il codice è assente nel file (BUG-04) ---
     # Applicata solo quando --since NON è impostato (strategia A ha priorità).
     #
     # Il codice nel log può comparire senza zero-padding (es. ORA-4036 per ORA-04036).
@@ -210,69 +202,16 @@ elif [ -n "$FILTER_CODE" ]; then
     # Esempio: ORA-04036 → grep "ORA-0*4036"
     _grep_pattern="ORA-0*${_code_num_stripped}"
 
-    # B1: fast-exit se il codice è assente nel file.
     # grep -cE stampa il conteggio anche quando esce con 1 (nessuna corrispondenza);
-    # non usare "|| echo 0" per evitare di duplicare il valore.
+    # non usare "|| echo 0" per evitare di duplicare il valore (gotcha bash).
     _code_count=$(LC_ALL=C grep -cE "$_grep_pattern" "$LOG_PATH" 2>/dev/null; true)
     if [ "${_code_count:-0}" -eq 0 ]; then
         # Nessuna occorrenza: data:[] senza leggere awk.
         # log_start_date e full_scan_performed vengono comunque valorizzati sotto.
         AWK_PREFILTER=3   # flag: nessun dato, output diretto
-    else
-        # B2: costruisce file ridotto con timestamp+riga per ogni occorrenza.
-        #
-        # Strategia in due passi (nessun caricamento in memoria del file intero):
-        #   Passo 1: grep -n → lista numeri di riga con il codice (es. "42\n108\n...")
-        #   Passo 2: costruisce la lista di righe da estrarre (ogni hit: riga-1 e riga),
-        #            poi awk legge il log UNA VOLTA sequenzialmente stampando solo quelle righe.
-        #            Questo costa O(n_log) invece di O(n_log * n_hits) ed è memory-safe.
-        #
-        # File risultante: righe "timestamp\nORA-...\ntimestamp\nORA-..." — input per awk principale.
-        AWK_CODE_TMPFILE=$(mktemp /tmp/scan_code_XXXXXX.log)
-
-        # Passo 1: numeri di riga delle occorrenze
-        _hit_lines=$(LC_ALL=C grep -nE "$_grep_pattern" "$LOG_PATH" 2>/dev/null \
-            | cut -d: -f1)
-
-        # Passo 2: costruisce lista deduplicata (prev, hit) e legge il log una sola volta
-        printf '%s\n' "$_hit_lines" | awk '
-{ hit = $1 + 0; prev = (hit > 1 ? hit - 1 : 1); wanted[prev]=1; wanted[hit]=1 }
-END { for (r in wanted) print r }' \
-            | sort -n \
-            | awk -v logfile="$LOG_PATH" '
-BEGIN {
-    # Legge i numeri di riga richiesti dallo stdin in un array
-    n_want = 0
-}
-# stdin: numeri di riga da estrarre (ordinati)
-{ want[++n_want] = $1 + 0 }
-END {
-    # Legge il log sequenzialmente, stampa solo le righe volute
-    w = 1
-    nr = 0
-    while ((getline line < logfile) > 0) {
-        nr++
-        if (w <= n_want && nr == want[w]) {
-            print line
-            w++
-            # Una riga può essere voluta più volte (prev==hit se hit==1): avanziamo
-            while (w <= n_want && want[w] == nr) w++
-        }
-        # Ottimizzazione: stop appena esauriamo tutte le righe volute
-        if (w > n_want) break
-    }
-    close(logfile)
-}' > "$AWK_CODE_TMPFILE"
-
-        if [ -s "$AWK_CODE_TMPFILE" ]; then
-            AWK_PREFILTER=2
-        else
-            # File ridotto vuoto (improbabile ma sicuro): fallback a lettura intera
-            rm -f "$AWK_CODE_TMPFILE"
-            AWK_CODE_TMPFILE=""
-            AWK_PREFILTER=0
-        fi
     fi
+    # Se count>0: AWK_PREFILTER rimane 0, awk legge il file intero con filter_code attivo.
+    # full_scan_performed sarà true (corretto: il file viene letto integralmente).
 fi
 
 # --- Scansione ORA- con awk ---------------------------------------------------
@@ -405,12 +344,11 @@ END {
 AWK
 # Tre branch espliciti per evitare il gotcha bash della process substitution
 # in variabile (<(cmd) salvato come stringa non funziona all'espansione).
-#   AWK_PREFILTER=0 → legge il file intero (nessun filtro attivo)
+#   AWK_PREFILTER=0 → legge il file intero (nessun filtro attivo o --code con occorrenze)
 #   AWK_PREFILTER=1 → Strategia A: tail -n +N (--since con data trovata)
-#   AWK_PREFILTER=2 → Strategia B: file ridotto con sole righe rilevanti (--code)
 #   AWK_PREFILTER=3 → fast-exit: codice assente, scan_output vuoto (nessuna lettura awk)
 if [ "$AWK_PREFILTER" = "3" ]; then
-    # BUG-04 B1: il codice non esiste nel log — nessuna lettura awk necessaria.
+    # B1: il codice non esiste nel log — nessuna lettura awk necessaria.
     scan_output=""
 elif [ "$AWK_PREFILTER" = "1" ]; then
     scan_output=$(LC_ALL=C awk \
@@ -421,17 +359,6 @@ elif [ "$AWK_PREFILTER" = "1" ]; then
         -f "${AWK_LIB}" \
         -f "$_awk_tmp" \
         <(tail -n +"$AWK_SINCE_START_LINE" "$LOG_PATH"))
-elif [ "$AWK_PREFILTER" = "2" ]; then
-    # BUG-04 B2: file ridotto — solo righe timestamp+ORA- per il codice cercato.
-    scan_output=$(LC_ALL=C awk \
-        -v filter_code="$FILTER_CODE" \
-        -v filter_since="$FILTER_SINCE" \
-        -v filter_until="$FILTER_UNTIL" \
-        -v filter_pdb="$FILTER_PDB" \
-        -f "${AWK_LIB}" \
-        -f "$_awk_tmp" \
-        "$AWK_CODE_TMPFILE")
-    rm -f "$AWK_CODE_TMPFILE"
 else
     scan_output=$(LC_ALL=C awk \
         -v filter_code="$FILTER_CODE" \
@@ -570,10 +497,13 @@ END {
 }
 ')
 
-# --- BUG-04: segnalazione full scan ------------------------------------------
-# full_scan_performed=true solo quando è stato letto l'intero file senza filtri.
-# Con --since (prefilter=1), --code con occorrenze (prefilter=2) o
-# --code senza occorrenze (prefilter=3): la scansione è parziale o assente.
+# --- BUG-04 / R3-01: segnalazione full scan ----------------------------------
+# full_scan_performed=true quando il file è stato letto integralmente.
+# Casi in cui è false:
+#   - AWK_PREFILTER=1 (--since): solo la coda del file viene letta
+#   - AWK_PREFILTER=3 (--code assente): nessuna lettura awk
+# AWK_PREFILTER=0 copre sia "nessun filtro" sia "--code con occorrenze"
+# (in entrambi i casi awk legge il file intero → full_scan_performed=true).
 if [ "$AWK_PREFILTER" = "0" ]; then
     FULL_SCAN="true"
 else
@@ -601,16 +531,27 @@ if [ -n "$FILTER_UNTIL" ]; then
     FILTER_UNTIL_JSON="\"${FILTER_UNTIL}\""
 fi
 
+# --- R3-03: criteri di escalation severity_effective -------------------------
+# severity_effective può superare severity (il valore per codice) quando il volume
+# lo giustifica. Il criterio dichiarato qui è lo stesso usato dall'awk sopra,
+# così un chiamante può costruire allarmi deterministici su severity_effective.
+# Soglie (applicate a ogni coppia code+pdb_name):
+#   occurrences_per_day > 50  OR  count > 500  → effective = "critical"
+#   occurrences_per_day > 10  OR  count > 100  → effective = "warning"  (solo se base non era critical)
+#   altrimenti → effective = severity di base  (o "unclassified" se non catalogato)
+SEV_THRESHOLDS='{"critical":{"occurrences_per_day_gt":50,"count_gt":500},"warning":{"occurrences_per_day_gt":10,"count_gt":100},"note":"applied per (code, pdb_name) pair; base severity preserved if higher"}'
+
 # Costruisce envelope con campi extra top-level (fuori da data[]):
-#   log_start_date      — prima data ISO nel log (BUG-05)
-#   full_scan_performed — se è stato letto l'intero file (BUG-04)
-#   filter_until        — valore del filtro --until usato, per trasparenza
-# Build dell'envelope con campi extra top-level (BUG-05, R-11, C3).
+#   log_start_date                  — prima data ISO nel log (BUG-05)
+#   full_scan_performed             — se è stato letto l'intero file (BUG-04)
+#   filter_until                    — valore del filtro --until usato, per trasparenza
+#   severity_escalation_thresholds  — criteri di escalation severity_effective (R3-03)
+# Build dell'envelope con campi extra top-level (BUG-05, R-11, C3, R3-03).
 # NOTA: data_json può avere newline interni (awk usa print non printf).
 # Per aggiungere i campi extra SOLO alla fine dell'envelope, comprimiamo
 # tutto su una riga prima di applicare il sed, poi riaggiungiamo il newline finale.
 _envelope_base=$(build_envelope "$TOOL" "$ENV" "$HOST" "$INST" "n/a" "ok" "$data_json" "null")
 printf '%s' "$_envelope_base" \
     | tr -d '\n' \
-    | sed "s/}$/,\"log_start_date\":${LOG_START_DATE},\"full_scan_performed\":${FULL_SCAN},\"filter_until\":${FILTER_UNTIL_JSON}}/"
+    | sed "s/}$/,\"log_start_date\":${LOG_START_DATE},\"full_scan_performed\":${FULL_SCAN},\"filter_until\":${FILTER_UNTIL_JSON},\"severity_escalation_thresholds\":${SEV_THRESHOLDS}}/"
 printf '\n'

@@ -168,7 +168,8 @@ build_error_json() {
     local code="$5" msg="$6" ctx="$7"
     local version="${8:-null}"
     local ts
-    ts=$(date -Iseconds 2>/dev/null || date +"%Y-%m-%dT%H:%M:%S%z")
+    # R3-04: UTC normalizzato (+00:00) su tutti i tool.
+    ts=$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")
     local msg_esc
     msg_esc=$(printf '%s' "$msg" | sed 's/\\/\\\\/g; s/"/\\"/g')
     local ver_json
@@ -190,7 +191,8 @@ build_envelope() {
     local tool="$1" env="$2" host="$3" inst="$4"
     local version="$5" status="$6" data="$7" error="$8"
     local ts
-    ts=$(date -Iseconds 2>/dev/null || date +"%Y-%m-%dT%H:%M:%S%z")
+    # R3-04: UTC normalizzato (+00:00) su tutti i tool.
+    ts=$(date -u +"%Y-%m-%dT%H:%M:%S+00:00")
     local ver_json inst_json
     if [ -z "$version" ] || [ "$version" = "null" ]; then
         ver_json="null"

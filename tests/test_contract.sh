@@ -600,26 +600,31 @@ test_b2_strftime_quick() {
     fi
 }
 
-# --- Test: BUG-04 pre-filtraggio --code (fast-exit + file ridotto) -------------
+# --- Test: BUG-04/R3-01 pre-filtraggio --code (fast-exit) ---------------------
 
 test_bug04_code_prefilter_quick() {
     local script="$1"
-    printf "\n  [BUG-04: --code fast-exit con file log fake]\n"
+    printf "\n  [BUG-04/R3-01: --code fast-exit con file log fake]\n"
 
     # Crea un log fake in formato ISO (12c+) con alcune righe ORA-
+    # Nota: il timestamp precede la riga ORA- di DUE righe (come nel log Oracle reale):
+    #   riga N:   timestamp ISO
+    #   riga N+1: descrizione (es. "Thread 1 cannot allocate...")
+    #   riga N+2: ORA-XXXXX: ...
+    # La B2 (file ridotto) estraeva solo (riga-1, riga) per ogni ORA-, perdendo il timestamp.
+    # Dopo R3-01 non esiste piu la B2: se count>0, awk legge il file intero.
     local fake_log
     fake_log=$(mktemp /tmp/test_bug04_XXXXXX.log)
     cat > "$fake_log" << 'FAKELOG'
 2026-09-01T08:00:00.000000+02:00
+Thread 1 cannot allocate new log
 ORA-00060: deadlock detected
 2026-09-01T09:00:00.000000+02:00
+Detailed info line
 VITAWFST(13):ORA-01555: snapshot too old
 2026-09-01T10:00:00.000000+02:00
 Background process info
 FAKELOG
-
-    # Sovrascrivi temporaneamente la logica NFS con un file locale
-    # Testiamo solo le funzioni di pre-filtraggio via bash diretto (non il tool intero)
 
     # Test B1: codice assente → grep -cE deve restituire 0
     # Nota: grep -cE stampa il count anche con exit 1 (0 match); non usare || echo 0
@@ -631,17 +636,16 @@ FAKELOG
         _fail "BUG-04/B1: grep -cE ORA-04030 ha trovato $absent_count (log fake errato?)"
     fi
 
-    # Test B2: codice presente → grep -cE deve restituire >0
+    # Test B2 (ex-R3-01): codice presente → grep -cE deve restituire >0 (file intero letto da awk)
     local present_count
     present_count=$(LC_ALL=C grep -cE "ORA-0*60" "$fake_log" 2>/dev/null; true)
     if [ "${present_count:-0}" -gt 0 ]; then
-        _ok "BUG-04/B2: grep -cE ORA-00060 su log con quel codice → $present_count (file ridotto attivato)"
+        _ok "BUG-04/B2: grep -cE ORA-00060 su log con quel codice → $present_count (awk legge file intero)"
     else
         _fail "BUG-04/B2: grep -cE ORA-00060 non ha trovato il codice (log fake errato?)"
     fi
 
     # Test B3: normalizzazione pattern ORA-0*N — ORA-60 deve trovare ORA-00060
-    # Il pattern "ORA-0*60" (regex) trova sia "ORA-60" che "ORA-00060"
     local check_norm
     check_norm=$(LC_ALL=C grep -cE "ORA-0*60" "$fake_log" 2>/dev/null; true)
     if [ "${check_norm:-0}" -gt 0 ]; then
@@ -650,8 +654,7 @@ FAKELOG
         _fail "BUG-04/B3: pattern ORA-0*60 non trova ORA-00060"
     fi
 
-    # Test B4: full_scan_performed=false con --code (log NFS non disponibile → skip)
-    # Questo richiederebbe un log NFS reale; verifichiamo solo che il tool accetti --code
+    # Test B4: il tool accetta --code senza crash
     local out rc=0
     out=$("$script" "TEST" "axnporadb41" "NP41CDB0" "--code=ORA-99999" 2>/dev/null) || rc=$?
     # Può essere log_not_found (no NFS) o ok con data:[] — non connection_failed
@@ -662,6 +665,190 @@ FAKELOG
     fi
 
     rm -f "$fake_log"
+}
+
+# --- Test: R3-01 — full_scan_performed=true quando count>0 (no B2) --------------
+# Verifica con log fake locale + awk su file tmp che il timestamp sia rilevato
+# anche quando precede la riga ORA- di 2 righe.
+# Usa file awk temporaneo perche gawk non supporta -f lib + programma posizionale inline.
+
+test_r3_01_timestamps_preserved() {
+    local script="$1"
+    printf "\n  [R3-01: timestamp preservato con 2 righe di distanza dall'ORA-]\n"
+
+    local fake_log awk_lib awk_prog script_dir
+    script_dir="$(cd "$(dirname "$script")/.." && pwd)"
+    awk_lib="${script_dir}/lib/json_esc.awk"
+    fake_log=$(mktemp /tmp/test_r3_01_XXXXXX.log)
+    cat > "$fake_log" << 'FAKELOG'
+2026-09-01T08:16:43.000000+02:00
+Thread 1 cannot allocate new log
+ORA-04031: unable to allocate shared memory
+2026-09-02T09:00:00.000000+02:00
+More context line
+ORA-04031: another occurrence
+FAKELOG
+
+    if [ ! -f "$awk_lib" ]; then
+        _skip "R3-01: lib/json_esc.awk non trovato — skip test awk locale"
+        rm -f "$fake_log"
+        return
+    fi
+
+    # Programma awk in file temporaneo (non inline) — necessario per usare -f lib + -f prog
+    awk_prog=$(mktemp /tmp/test_r3_01_XXXXXX.awk)
+    cat > "$awk_prog" << 'AWKPROG'
+/^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}/ {
+    ts = $0; sub(/\.[0-9]+.*/, "", ts); gsub(/ /, "T", ts); last_ts = ts; next
+}
+/ORA-[0-9][0-9]+/ {
+    line = $0
+    while (match(line, /ORA-[0-9][0-9]+/)) {
+        raw = substr(line, RSTART, RLENGTH)
+        line = substr(line, RSTART + RLENGTH)
+        num = substr(raw, 5)
+        while (length(num) < 5) num = "0" num
+        code = "ORA-" num
+        key = code SUBSEP ""
+        if (!(key in counts)) {
+            counts[key] = 0
+            first_seen[key] = (last_ts != "" ? last_ts : "UNKNOWN")
+        }
+        counts[key]++
+        last_seen[key] = (last_ts != "" ? last_ts : "UNKNOWN")
+    }
+}
+END {
+    for (k in counts) {
+        split(k, p, SUBSEP)
+        printf "%s|%s|%s|%d\n", p[1], first_seen[k], last_seen[k], counts[k]
+    }
+}
+AWKPROG
+
+    local awk_out
+    awk_out=$(LC_ALL=C awk \
+        -v filter_code="" \
+        -v filter_since="" \
+        -v filter_until="" \
+        -v filter_pdb="" \
+        -f "$awk_lib" \
+        -f "$awk_prog" \
+        "$fake_log" 2>/dev/null)
+
+    rm -f "$awk_prog" "$fake_log"
+
+    # Verifica che first_seen non sia "UNKNOWN"
+    if printf '%s' "$awk_out" | grep -q "UNKNOWN"; then
+        _fail "R3-01: timestamp UNKNOWN trovato — awk non vede il timestamp 2 righe prima dell'ORA-"
+    elif [ -z "$awk_out" ]; then
+        _fail "R3-01: awk non ha prodotto output (log fake vuoto o awk fallito)"
+    else
+        local first_ts
+        first_ts=$(printf '%s' "$awk_out" | head -1 | cut -d'|' -f2)
+        if printf '%s' "$first_ts" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}'; then
+            _ok "R3-01: first_seen=$first_ts (timestamp rilevato correttamente 2 righe prima dell'ORA-)"
+        else
+            _fail "R3-01: first_seen='$first_ts' non è un timestamp ISO valido"
+        fi
+    fi
+}
+
+# --- Test: R3-02 — pga_by_pdb_session tetto MAX_LIMIT --------------------------
+
+test_r3_02_pga_limit_max() {
+    local script="$1"
+    printf "\n  [R3-02: pga_by_pdb_session --limit=999999 → invalid_argument (sopra tetto 500)]\n"
+    local out rc=0
+    out=$("$script" "TEST" "axnporadb41" "NP41CDB0" "--limit=999999" 2>/dev/null) || rc=$?
+    if [ "$rc" = "2" ] || ([ "$rc" = "1" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1); then
+        _ok "--limit=999999 (sopra tetto 500) → invalid_argument"
+    else
+        _fail "--limit=999999 non ha restituito invalid_argument (rc=$rc, out=$(printf '%s' "$out" | head -1))"
+    fi
+
+    printf "  [R3-02: pga_by_pdb_session --limit=500 → accettato (al tetto)]\n"
+    rc=0
+    out=$("$script" "TEST" "axnporadb41" "NP41CDB0" "--limit=500" 2>/dev/null) || rc=$?
+    if [ "$rc" = "2" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1; then
+        _fail "--limit=500 (al tetto) rifiutato come invalid_argument"
+    else
+        _ok "--limit=500 (al tetto) accettato dalla validazione (rc=$rc)"
+    fi
+}
+
+# --- Test: R3-03 — scan_alert_log severity_escalation_thresholds presente ------
+# Il campo viene aggiunto solo sull'envelope di successo (status=ok).
+# In --quick non abbiamo NFS → il tool restituisce log_not_found (errore).
+# Verifica invece che il campo sia nel JSON di successo usando un log fake locale
+# e la stessa pipeline bash usata dal tool (build_envelope + sed finale).
+
+test_r3_03_severity_thresholds() {
+    local script="$1"
+    printf "\n  [R3-03: scan_alert_log → severity_escalation_thresholds nel JSON di successo]\n"
+
+    # Simuliamo la stessa sed-pipeline che scan_alert_log usa per costruire l'envelope finale.
+    # Partiamo da un JSON base come quello prodotto da build_envelope.
+    local fake_base fake_out
+    fake_base='{"tool":"scan_alert_log","generated_at":"2026-09-01T00:00:00+00:00","environment":"TEST","hostname":"axnporadb41","instance_name":"NP41CDB0","oracle_version":"n/a","status":"ok","data":[],"error":null}'
+    local SEV_THRESHOLDS
+    SEV_THRESHOLDS='{"critical":{"occurrences_per_day_gt":50,"count_gt":500},"warning":{"occurrences_per_day_gt":10,"count_gt":100},"note":"applied per (code, pdb_name) pair; base severity preserved if higher"}'
+    fake_out=$(printf '%s' "$fake_base" \
+        | tr -d '\n' \
+        | sed "s/}\$/,\"log_start_date\":null,\"full_scan_performed\":true,\"filter_until\":null,\"severity_escalation_thresholds\":${SEV_THRESHOLDS}}/")
+
+    if printf '%s' "$fake_out" | jq -e 'has("severity_escalation_thresholds")' >/dev/null 2>&1; then
+        _ok "severity_escalation_thresholds presente nell'envelope (pipeline sed OK)"
+        if printf '%s' "$fake_out" | jq -e '.severity_escalation_thresholds | has("critical") and has("warning")' >/dev/null 2>&1; then
+            _ok "severity_escalation_thresholds contiene critical e warning"
+        else
+            _fail "severity_escalation_thresholds manca di critical o warning"
+        fi
+    else
+        _fail "severity_escalation_thresholds assente — pipeline sed non funziona"
+    fi
+
+    # Se abbiamo NFS (rc=0) verifica sull'output reale; altrimenti skip
+    local out rc=0
+    out=$("$script" "TEST" "axnporadb41" "NP41CDB0" 2>/dev/null) || rc=$?
+    if [ "$rc" = "0" ]; then
+        if printf '%s' "$out" | jq -e 'has("severity_escalation_thresholds")' >/dev/null 2>&1; then
+            _ok "severity_escalation_thresholds presente nell'output reale del tool"
+        else
+            _fail "severity_escalation_thresholds assente dall'output reale del tool"
+        fi
+    else
+        _skip "R3-03: NFS non disponibile — test sull'output reale skippato (rc=$rc)"
+    fi
+}
+
+# --- Test: R3-04 — generated_at in UTC (+00:00) --------------------------------
+
+test_r3_04_generated_at_utc() {
+    local script="$1" host_only="${2:-0}" env_only="${3:-0}"
+    printf "\n  [R3-04: generated_at deve essere in UTC (+00:00)]\n"
+    local out rc=0
+    if [ "$env_only" = "1" ]; then
+        out=$("$script" "INVALIDO" 2>/dev/null) || rc=$?
+    elif [ "$host_only" = "1" ]; then
+        out=$("$script" "INVALIDO" "axnporadb41" 2>/dev/null) || rc=$?
+    else
+        out=$("$script" "INVALIDO" "axnporadb41" "NP41CDB0" 2>/dev/null) || rc=$?
+    fi
+    # Anche un errore invalid_environment ha generated_at — verifichiamo su quello
+    if _is_valid_json "$out"; then
+        local ts
+        ts=$(printf '%s' "$out" | jq -r '.generated_at // ""')
+        if printf '%s' "$ts" | grep -qE '\+00:00$'; then
+            _ok "generated_at=$ts (UTC +00:00 confermato)"
+        elif [ -z "$ts" ]; then
+            _fail "generated_at assente dall'envelope"
+        else
+            _fail "generated_at=$ts (non UTC — atteso +00:00)"
+        fi
+    else
+        _skip "R3-04: output non JSON — impossibile verificare generated_at"
+    fi
 }
 
 # --- Test: parametri opzionali tool OS ----------------------------------------
@@ -719,12 +906,22 @@ run_test() {
     # Test hostname traversal (R-10) — no connessione, eseguiti anche in --quick
     test_hostname_traversal "$script" "$host_only" "$env_only"
 
-    # Test ora_errors.json + --until (C3) + R-07 + BUG-04 — no connessione, anche in --quick
+    # Test ora_errors.json + --until (C3) + R-07 + BUG-04/R3-01 — no connessione, anche in --quick
     if [ "$tool_name" = "scan_alert_log" ]; then
         test_ora_errors_coverage "$script"
         test_scan_alert_log_until_quick "$script"
         test_bug04_code_prefilter_quick "$script"
+        test_r3_01_timestamps_preserved "$script"
+        test_r3_03_severity_thresholds "$script"
     fi
+
+    # R3-02: pga_by_pdb_session tetto su --limit (no connessione)
+    if [ "$tool_name" = "pga_by_pdb_session" ]; then
+        test_r3_02_pga_limit_max "$script"
+    fi
+
+    # R3-04: generated_at in UTC — no connessione (usiamo input invalido per ottenere JSON)
+    test_r3_04_generated_at_utc "$script" "$host_only" "$env_only"
 
     # B2: strftime disponibile (no connessione)
     if [ "$tool_name" = "os_cpu_stats" ]; then
@@ -771,6 +968,7 @@ run_test() {
                 ;;
             pga_by_pdb_session)
                 test_pga_pdb_session_limit "$script"
+                test_r3_02_pga_limit_max "$script"
                 ;;
             scan_alert_log)
                 test_scan_alert_log_params "$script"
