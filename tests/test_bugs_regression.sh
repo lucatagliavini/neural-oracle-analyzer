@@ -209,6 +209,7 @@ ALL_BUGS=(
     "R-15:check_resource_limits: scope nell'envelope"
     "R-16:scan_alert_log: severity_effective e occurrences_per_day"
     "R-17:diagnose_instance: flag per istanza OPEN senza PDB applicativi"
+    "B2:os_memory_stats/os_cpu_stats: timestamp distinti per ogni campione"
 )
 
 if [ "$LIST_ONLY" = "1" ]; then
@@ -1141,6 +1142,33 @@ PYEOF
             _skip "R-17: CE02CDB1 ha $aperti PDB aperti al momento (stato cambiato?)"
         fi
     fi
+fi
+
+# ---------------------------------------------------------------------------
+# B2 — os_memory_stats/os_cpu_stats: timestamp distinti per ogni campione
+# ---------------------------------------------------------------------------
+if _should_run "B2"; then
+    _section_header "B2" "os_memory_stats/os_cpu_stats: ogni campione ha timestamp distinto"
+
+    for tool_name in "os_cpu_stats" "os_memory_stats"; do
+        out=$(_run_tool "${TOOLS_DIR}/${tool_name}.sh" "$ENV" "$HOST" "--samples=3" "--interval=1") || true
+        if _assert_json_valid "B2/${tool_name}" "$out"; then
+            _assert_status_ok "B2/${tool_name}" "$out"
+
+            n_samples=$(_jq "$out" '.data[0].samples | length')
+            if [ "${n_samples:-0}" -ge 2 ]; then
+                ts0=$(_jq "$out" '.data[0].samples[0].ts')
+                ts1=$(_jq "$out" '.data[0].samples[1].ts')
+                if [ "$ts0" != "$ts1" ]; then
+                    _ok "B2/${tool_name}: campioni 0 e 1 hanno timestamp distinti ($ts0 vs $ts1)"
+                else
+                    _fail "B2/${tool_name}: campioni 0 e 1 hanno lo stesso timestamp ($ts0) — B2 non risolto"
+                fi
+            else
+                _skip "B2/${tool_name}: meno di 2 campioni ($n_samples) — impossibile verificare"
+            fi
+        fi
+    done
 fi
 
 # ---------------------------------------------------------------------------

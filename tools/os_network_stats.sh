@@ -122,7 +122,9 @@ if [ "$INTERVAL" -gt 0 ]; then
 fi
 
 SSH_OPTS="-i ${ORACLE_SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes"
+# B2: ts_start_epoch permette all'awk di calcolare il timestamp di ogni campione.
 TS_NOW=$(date -Iseconds 2>/dev/null || date +"%Y-%m-%dT%H:%M:%S%z")
+TS_EPOCH=$(date +%s 2>/dev/null || echo "0")
 
 # --- Costruzione comando per OS -----------------------------------------------
 
@@ -190,6 +192,7 @@ INTERVAL_VAL="$INTERVAL"
 JSON=$(printf '%s' "$RAW_SAMPLES" | awk \
     -v os_type="$OS_TYPE" \
     -v ts_base="$TS_NOW" \
+    -v ts_epoch="$TS_EPOCH" \
     -v iface_filter="$IFACE_FILTER" \
     -v interval="$INTERVAL_VAL" \
 '
@@ -391,7 +394,13 @@ END {
         split(key, kp, ":"); sidx = kp[1]; iface = kp[2]
         if (!first_s) samples_json = samples_json ","
         first_s = 0
-        samples_json = samples_json "{\"ts\":\"" ts_base "\",\"iface\":\"" iface "\""
+        # B2: timestamp per campione = start + sidx * interval secondi
+        if (ts_epoch > 0) {
+            ts_i = strftime("%Y-%m-%dT%H:%M:%S+00:00", ts_epoch + sidx * interval)
+        } else {
+            ts_i = ts_base
+        }
+        samples_json = samples_json "{\"ts\":\"" ts_i "\",\"iface\":\"" iface "\""
         samples_json = samples_json ",\"rx_bytes_per_sec\":" sprintf("%.0f", rx_rate[key])
         samples_json = samples_json ",\"tx_bytes_per_sec\":" sprintf("%.0f", tx_rate[key])
         samples_json = samples_json ",\"rx_errors\":" rx_err[key]

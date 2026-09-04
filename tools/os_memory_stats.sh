@@ -114,7 +114,9 @@ SSH_OPTS="-i ${ORACLE_SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=5 -
 
 # --- Verifica comandi e raccolta dati per OS ----------------------------------
 
+# B2: ts_start_epoch permette all'awk di calcolare il timestamp di ogni campione.
 TS_NOW=$(date -Iseconds 2>/dev/null || date +"%Y-%m-%dT%H:%M:%S%z")
+TS_EPOCH=$(date +%s 2>/dev/null || echo "0")
 
 case "$OS_TYPE" in
 
@@ -145,7 +147,8 @@ case "$OS_TYPE" in
     }
 
     JSON=$(printf '%s' "$RAW_SAMPLES" | awk \
-        -v os_type="$OS_TYPE" -v ts_base="$TS_NOW" '
+        -v os_type="$OS_TYPE" -v ts_base="$TS_NOW" \
+        -v ts_epoch="$TS_EPOCH" -v interval="$INTERVAL" '
 BEGIN {
     section = "svmon"
     sample_idx = 0
@@ -253,7 +256,12 @@ END {
     samples_json = "["
     for (i = 1; i <= n; i++) {
         if (i > 1) samples_json = samples_json ","
-        entry = "{\"ts\":\"" ts_base "\",\"ram_total_bytes\":" ram_total[i] ",\"ram_used_bytes\":" ram_used[i] ",\"ram_free_bytes\":" ram_free[i] ",\"swap_total_bytes\":" swp_total[i] ",\"swap_used_bytes\":" swp_used[i] ",\"page_in_per_sec\":" pg_in[i] ",\"page_out_per_sec\":" pg_out[i] "}"
+        if (ts_epoch > 0) {
+            ts_i = strftime("%Y-%m-%dT%H:%M:%S+00:00", ts_epoch + (i-1) * interval)
+        } else {
+            ts_i = ts_base
+        }
+        entry = "{\"ts\":\"" ts_i "\",\"ram_total_bytes\":" ram_total[i] ",\"ram_used_bytes\":" ram_used[i] ",\"ram_free_bytes\":" ram_free[i] ",\"swap_total_bytes\":" swp_total[i] ",\"swap_used_bytes\":" swp_used[i] ",\"page_in_per_sec\":" pg_in[i] ",\"page_out_per_sec\":" pg_out[i] "}"
         samples_json = samples_json entry
     }
     samples_json = samples_json "]"
@@ -308,7 +316,8 @@ function percentile(arr, n, p,    idx, frac, lo, hi) {
     }
 
     JSON=$(printf '%s' "$RAW_SAMPLES" | awk \
-        -v os_type="$OS_TYPE" -v ts_base="$TS_NOW" '
+        -v os_type="$OS_TYPE" -v ts_base="$TS_NOW" \
+        -v ts_epoch="$TS_EPOCH" -v interval="$INTERVAL" '
 BEGIN {
     section = "free"
     sample_idx = 0
@@ -365,7 +374,12 @@ END {
     samples_json = "["
     for (i = 1; i <= n; i++) {
         if (i > 1) samples_json = samples_json ","
-        entry = "{\"ts\":\"" ts_base "\",\"ram_total_bytes\":" ram_total[i] ",\"ram_used_bytes\":" ram_used[i] ",\"ram_free_bytes\":" ram_free[i] ",\"swap_total_bytes\":" swp_total[i] ",\"swap_used_bytes\":" swp_used[i] ",\"page_in_per_sec\":" pg_in[i] ",\"page_out_per_sec\":" pg_out[i] "}"
+        if (ts_epoch > 0) {
+            ts_i = strftime("%Y-%m-%dT%H:%M:%S+00:00", ts_epoch + (i-1) * interval)
+        } else {
+            ts_i = ts_base
+        }
+        entry = "{\"ts\":\"" ts_i "\",\"ram_total_bytes\":" ram_total[i] ",\"ram_used_bytes\":" ram_used[i] ",\"ram_free_bytes\":" ram_free[i] ",\"swap_total_bytes\":" swp_total[i] ",\"swap_used_bytes\":" swp_used[i] ",\"page_in_per_sec\":" pg_in[i] ",\"page_out_per_sec\":" pg_out[i] "}"
         samples_json = samples_json entry
     }
     samples_json = samples_json "]"

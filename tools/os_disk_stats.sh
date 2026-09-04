@@ -112,7 +112,9 @@ if [ "$INTERVAL" -gt 0 ]; then
 fi
 
 SSH_OPTS="-i ${ORACLE_SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes"
+# B2: ts_start_epoch permette all'awk di calcolare il timestamp di ogni campione.
 TS_NOW=$(date -Iseconds 2>/dev/null || date +"%Y-%m-%dT%H:%M:%S%z")
+TS_EPOCH=$(date +%s 2>/dev/null || echo "0")
 
 # --- Raccolta df (sempre disponibile) -----------------------------------------
 
@@ -205,7 +207,8 @@ else
 
     if [ "$IO_AVAILABLE" = "true" ] && [ -n "$RAW_IO" ]; then
         IO_PARSE=$(printf '%s' "$RAW_IO" | awk \
-            -v os_type="$OS_TYPE" -v ts_base="$TS_NOW" '
+            -v os_type="$OS_TYPE" -v ts_base="$TS_NOW" \
+            -v ts_epoch="$TS_EPOCH" -v interval="$INTERVAL" '
 BEGIN {
     sample_idx = 0
     hdr_seen = 0
@@ -269,13 +272,18 @@ END {
     first_item = 1
     n = sample_idx + 1
     for (i = 0; i < n; i++) {
+        if (ts_epoch > 0) {
+            ts_i = strftime("%Y-%m-%dT%H:%M:%S+00:00", ts_epoch + i * interval)
+        } else {
+            ts_i = ts_base
+        }
         for (dev in devices) {
             key = i "_" dev
             if (key in data_rs) {
                 if (!first_item) printf ","
                 first_item = 0
                 printf "{\"ts\":\"%s\",\"device\":\"%s\",\"reads_per_sec\":%.2f,\"writes_per_sec\":%.2f,\"read_kb_per_sec\":%.2f,\"write_kb_per_sec\":%.2f,\"await_ms\":%.2f}",
-                    ts_base, dev, data_rs[key], data_ws[key], data_rkb[key], data_wkb[key], data_await[key]
+                    ts_i, dev, data_rs[key], data_ws[key], data_rkb[key], data_wkb[key], data_await[key]
             }
         }
     }

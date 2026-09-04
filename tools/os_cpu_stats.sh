@@ -156,9 +156,13 @@ RAW_SAMPLES=$(os_sample "$HOST" "$SAMPLES" "$INTERVAL" "$CMD_VMSTAT" "$CMD_VMSTA
 
 # --- Parsing e aggregazione in awk -------------------------------------------
 
+# B2: ts_start_epoch permette all'awk di calcolare il timestamp di ogni campione.
+# L'awk usa strftime (gawk/RHEL) per produrre ISO 8601; fallback = ts_base per tutti.
 TS_NOW=$(date -Iseconds 2>/dev/null || date +"%Y-%m-%dT%H:%M:%S%z")
+TS_EPOCH=$(date +%s 2>/dev/null || echo "0")
 
 JSON=$(printf '%s' "$RAW_SAMPLES" | awk -v os_type="$OS_TYPE" -v ts_base="$TS_NOW" \
+    -v ts_epoch="$TS_EPOCH" -v interval="$INTERVAL" \
     -v cpu_count="$CPU_COUNT" '
 BEGIN {
     sample_idx = 0
@@ -210,7 +214,13 @@ END {
     samples_json = "["
     for (i = 1; i <= n; i++) {
         if (i > 1) samples_json = samples_json ","
-        entry = "{\"ts\":\"" ts_base "\",\"cpu_user_pct\":" us[i] ",\"cpu_sys_pct\":" sy[i] ",\"cpu_idle_pct\":" id_[i] ",\"cpu_wait_pct\":" wa[i] ",\"run_queue\":" rq[i] "}"
+        # B2: timestamp per campione = start + (i-1)*interval secondi
+        if (ts_epoch > 0) {
+            ts_i = strftime("%Y-%m-%dT%H:%M:%S+00:00", ts_epoch + (i-1) * interval)
+        } else {
+            ts_i = ts_base
+        }
+        entry = "{\"ts\":\"" ts_i "\",\"cpu_user_pct\":" us[i] ",\"cpu_sys_pct\":" sy[i] ",\"cpu_idle_pct\":" id_[i] ",\"cpu_wait_pct\":" wa[i] ",\"run_queue\":" rq[i] "}"
         samples_json = samples_json entry
     }
     samples_json = samples_json "]"

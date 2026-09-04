@@ -580,6 +580,26 @@ test_fra_configured_field() {
     fi
 }
 
+# --- Test: timestamp per campione (B2) — verifica che awk strftime sia disponibile ----
+
+test_b2_strftime_quick() {
+    # Verifica che gawk supporti strftime sull'host MCP (RHEL), necessario per B2.
+    # Non richiede connessione SSH: esegue solo awk localmente.
+    printf "\n  [B2: awk strftime disponibile sull'host MCP]\n"
+    local ts_epoch ts_out
+    ts_epoch=$(date +%s 2>/dev/null || echo "0")
+    if [ "$ts_epoch" = "0" ]; then
+        _skip "B2: date +%s non disponibile — impossibile verificare"
+        return
+    fi
+    ts_out=$(awk -v ep="$ts_epoch" 'BEGIN { print strftime("%Y-%m-%dT%H:%M:%S+00:00", ep) }' 2>/dev/null)
+    if printf '%s' "$ts_out" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}'; then
+        _ok "B2: strftime in awk funziona → $ts_out"
+    else
+        _fail "B2: strftime in awk non disponibile — i timestamp dei campioni useranno ts_base"
+    fi
+}
+
 # --- Test: parametri opzionali tool OS ----------------------------------------
 
 test_os_tool_params() {
@@ -639,6 +659,11 @@ run_test() {
     if [ "$tool_name" = "scan_alert_log" ]; then
         test_ora_errors_coverage "$script"
         test_scan_alert_log_until_quick "$script"
+    fi
+
+    # B2: strftime disponibile (no connessione)
+    if [ "$tool_name" = "os_cpu_stats" ]; then
+        test_b2_strftime_quick "$script"
     fi
 
     # R-05: tail_alert_log tetto su --lines (no connessione)
