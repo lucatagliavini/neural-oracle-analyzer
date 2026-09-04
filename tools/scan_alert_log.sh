@@ -136,33 +136,49 @@ if [ -z "$LOG_PATH" ]; then
     exit 1
 fi
 
-# --- Pre-filtraggio I/O quando --since è specificato --------------------------
+# --- Pre-filtraggio I/O -------------------------------------------------------
 #
-# Strategia: quando FILTER_SINCE è impostato, usiamo grep -n per trovare la
-# prima riga che inizia con la data ISO richiesta, poi passiamo ad awk solo
-# la coda del file con tail -n +N. Questo riduce drasticamente l'I/O NFS su
-# file grandi (es. 388 MB → ~20 MB per un filtro "ultime 2 settimane").
+# Due strategie combinate per ridurre la lettura NFS su file grandi (58-400 MB):
 #
-# Prerequisito: il log deve usare il formato timestamp ISO 8601 (Oracle 12c+):
+# STRATEGIA A — --since (già implementata):
+#   Usa grep -n per trovare la prima riga con la data richiesta, poi tail -n +N
+#   passa ad awk solo la coda del file. Riduzione tipica: 388 MB → ~20 MB.
+#
+# STRATEGIA B — --code senza --since (BUG-04):
+#   Quando è specificato solo --code (senza --since), il file veniva letto
+#   integralmente da awk anche se il codice era assente o rarissimo.
+#
+#   Fasi:
+#     B1. grep -c verifica se il codice esiste nel file.
+#         Se count=0 → fast-exit con data:[] (nessuna lettura awk).
+#     B2. Se count>0, grep -n raccoglie i numeri di riga delle occorrenze.
+#         awk costruisce un file ridotto con solo le righe rilevanti:
+#         per ogni riga ORA- include la riga precedente (timestamp) + la riga stessa.
+#         Il file ridotto viene passato all'awk principale invece del file intero.
+#
+#   Normalizzazione codice: --code=ORA-04036 deve trovare anche ORA-4036 nel log.
+#   Il grep cerca entrambe le forme (con e senza zero-padding).
+#
+# Prerequisito formato ISO (Oracle 12c+):
 #   "2026-09-01T08:16:43.043810+02:00"
-# I log con formato testuale puro 11g ("Tue Sep 01 08:16:43 2022") non hanno
-# righe che iniziano con YYYY-MM-DD e il pre-filtraggio verrebbe saltato.
-# Un log "misto" (startup 11g + body 12c+) è gestito correttamente: grep -m1
-# trova la prima riga ISO (anche se non è nelle primissime righe).
+#   Log 11g puri (formato testuale) → pre-filtraggio saltato, awk legge tutto.
 #
 # Casi gestiti:
-#   1. FILTER_SINCE non impostato        → AWK_PREFILTER=0, awk legge LOG_PATH intero
-#   2. FILTER_SINCE impostato, ISO check OK, data trovata nel log
-#                                        → AWK_PREFILTER=1, awk legge tail -n +N
-#   3. FILTER_SINCE impostato, ISO check OK, data NON trovata (since oltre fine log)
-#                                        → data: [] diretto, senza passare per awk
-#   4. FILTER_SINCE impostato, nessuna riga ISO nel file (log 11g puro)
-#                                        → AWK_PREFILTER=0, awk legge file intero (fallback)
+#   1. Nessun filtro                          → AWK_PREFILTER=0, awk legge LOG_PATH intero
+#   2. --since, ISO OK, data trovata          → AWK_PREFILTER=1 (tail -n +N)
+#   3. --since, ISO OK, data non trovata      → fast-exit data:[]
+#   4. --since, log 11g puro                  → AWK_PREFILTER=0, fallback intero
+#   5. --code senza --since, codice assente   → fast-exit data:[] (B1)
+#   6. --code senza --since, codice presente  → AWK_PREFILTER=2 (file ridotto) (B2)
+#   7. --code + --since                       → Strategia A ha priorità (tail -n +N)
+#   8. --code + --since + --until             → Strategia A (tail -n +N + filtro until in awk)
 
 AWK_PREFILTER=0
 AWK_SINCE_START_LINE=""
+AWK_CODE_TMPFILE=""   # file temporaneo con righe ridotte per Strategia B
 
 if [ -n "$FILTER_SINCE" ]; then
+    # --- Strategia A: pre-filtraggio per --since ---
     # Verifica che il log contenga almeno una riga in formato ISO (12c+).
     # grep -m1 si ferma alla prima hit → istantaneo anche su file da 400 MB.
     has_iso=$(grep -m1 -cE "^[0-9]{4}-[0-9]{2}-[0-9]{2}T" "$LOG_PATH" 2>/dev/null || true)
@@ -175,11 +191,88 @@ if [ -n "$FILTER_SINCE" ]; then
         else
             # Nessuna riga con quella data: il log non ha dati nel range richiesto.
             # Restituiamo data: [] senza passare per awk (che non troverebbe nulla).
-            build_envelope "$TOOL" "$ENV" "$HOST" "$INST" "null" "ok" "[]" "null"
+            build_envelope "$TOOL" "$ENV" "$HOST" "$INST" "n/a" "ok" "[]" "null"
             exit 0
         fi
     fi
     # Se has_iso=0 (log 11g puro): AWK_PREFILTER rimane 0, awk filtra in-flight come prima.
+
+elif [ -n "$FILTER_CODE" ]; then
+    # --- Strategia B: pre-filtraggio per --code (BUG-04) ---
+    # Applicata solo quando --since NON è impostato (strategia A ha priorità).
+    #
+    # Il codice nel log può comparire senza zero-padding (es. ORA-4036 per ORA-04036).
+    # Costruiamo un pattern grep che trova entrambe le forme:
+    #   --code=ORA-04036 → cerca "ORA-04036" e "ORA-4036" (strip leading zeros)
+    _code_num="${FILTER_CODE#ORA-}"
+    _code_num_stripped=$(printf '%s' "$_code_num" | sed 's/^0*//')
+    # Pattern: ORA- seguito da zero o più zeri opzionali + numero senza zeri
+    # Esempio: ORA-04036 → grep "ORA-0*4036"
+    _grep_pattern="ORA-0*${_code_num_stripped}"
+
+    # B1: fast-exit se il codice è assente nel file.
+    # grep -cE stampa il conteggio anche quando esce con 1 (nessuna corrispondenza);
+    # non usare "|| echo 0" per evitare di duplicare il valore.
+    _code_count=$(LC_ALL=C grep -cE "$_grep_pattern" "$LOG_PATH" 2>/dev/null; true)
+    if [ "${_code_count:-0}" -eq 0 ]; then
+        # Nessuna occorrenza: data:[] senza leggere awk.
+        # log_start_date e full_scan_performed vengono comunque valorizzati sotto.
+        AWK_PREFILTER=3   # flag: nessun dato, output diretto
+    else
+        # B2: costruisce file ridotto con timestamp+riga per ogni occorrenza.
+        #
+        # Strategia in due passi (nessun caricamento in memoria del file intero):
+        #   Passo 1: grep -n → lista numeri di riga con il codice (es. "42\n108\n...")
+        #   Passo 2: costruisce la lista di righe da estrarre (ogni hit: riga-1 e riga),
+        #            poi awk legge il log UNA VOLTA sequenzialmente stampando solo quelle righe.
+        #            Questo costa O(n_log) invece di O(n_log * n_hits) ed è memory-safe.
+        #
+        # File risultante: righe "timestamp\nORA-...\ntimestamp\nORA-..." — input per awk principale.
+        AWK_CODE_TMPFILE=$(mktemp /tmp/scan_code_XXXXXX.log)
+
+        # Passo 1: numeri di riga delle occorrenze
+        _hit_lines=$(LC_ALL=C grep -nE "$_grep_pattern" "$LOG_PATH" 2>/dev/null \
+            | cut -d: -f1)
+
+        # Passo 2: costruisce lista deduplicata (prev, hit) e legge il log una sola volta
+        printf '%s\n' "$_hit_lines" | awk '
+{ hit = $1 + 0; prev = (hit > 1 ? hit - 1 : 1); wanted[prev]=1; wanted[hit]=1 }
+END { for (r in wanted) print r }' \
+            | sort -n \
+            | awk -v logfile="$LOG_PATH" '
+BEGIN {
+    # Legge i numeri di riga richiesti dallo stdin in un array
+    n_want = 0
+}
+# stdin: numeri di riga da estrarre (ordinati)
+{ want[++n_want] = $1 + 0 }
+END {
+    # Legge il log sequenzialmente, stampa solo le righe volute
+    w = 1
+    nr = 0
+    while ((getline line < logfile) > 0) {
+        nr++
+        if (w <= n_want && nr == want[w]) {
+            print line
+            w++
+            # Una riga può essere voluta più volte (prev==hit se hit==1): avanziamo
+            while (w <= n_want && want[w] == nr) w++
+        }
+        # Ottimizzazione: stop appena esauriamo tutte le righe volute
+        if (w > n_want) break
+    }
+    close(logfile)
+}' > "$AWK_CODE_TMPFILE"
+
+        if [ -s "$AWK_CODE_TMPFILE" ]; then
+            AWK_PREFILTER=2
+        else
+            # File ridotto vuoto (improbabile ma sicuro): fallback a lettura intera
+            rm -f "$AWK_CODE_TMPFILE"
+            AWK_CODE_TMPFILE=""
+            AWK_PREFILTER=0
+        fi
+    fi
 fi
 
 # --- Scansione ORA- con awk ---------------------------------------------------
@@ -310,9 +403,16 @@ END {
     }
 }
 AWK
-# Due branch espliciti per evitare il gotcha bash della process substitution
+# Tre branch espliciti per evitare il gotcha bash della process substitution
 # in variabile (<(cmd) salvato come stringa non funziona all'espansione).
-if [ "$AWK_PREFILTER" = "1" ]; then
+#   AWK_PREFILTER=0 → legge il file intero (nessun filtro attivo)
+#   AWK_PREFILTER=1 → Strategia A: tail -n +N (--since con data trovata)
+#   AWK_PREFILTER=2 → Strategia B: file ridotto con sole righe rilevanti (--code)
+#   AWK_PREFILTER=3 → fast-exit: codice assente, scan_output vuoto (nessuna lettura awk)
+if [ "$AWK_PREFILTER" = "3" ]; then
+    # BUG-04 B1: il codice non esiste nel log — nessuna lettura awk necessaria.
+    scan_output=""
+elif [ "$AWK_PREFILTER" = "1" ]; then
     scan_output=$(LC_ALL=C awk \
         -v filter_code="$FILTER_CODE" \
         -v filter_since="$FILTER_SINCE" \
@@ -321,6 +421,17 @@ if [ "$AWK_PREFILTER" = "1" ]; then
         -f "${AWK_LIB}" \
         -f "$_awk_tmp" \
         <(tail -n +"$AWK_SINCE_START_LINE" "$LOG_PATH"))
+elif [ "$AWK_PREFILTER" = "2" ]; then
+    # BUG-04 B2: file ridotto — solo righe timestamp+ORA- per il codice cercato.
+    scan_output=$(LC_ALL=C awk \
+        -v filter_code="$FILTER_CODE" \
+        -v filter_since="$FILTER_SINCE" \
+        -v filter_until="$FILTER_UNTIL" \
+        -v filter_pdb="$FILTER_PDB" \
+        -f "${AWK_LIB}" \
+        -f "$_awk_tmp" \
+        "$AWK_CODE_TMPFILE")
+    rm -f "$AWK_CODE_TMPFILE"
 else
     scan_output=$(LC_ALL=C awk \
         -v filter_code="$FILTER_CODE" \
@@ -460,12 +571,13 @@ END {
 ')
 
 # --- BUG-04: segnalazione full scan ------------------------------------------
-# full_scan_performed=true quando non c'è filtro --since (o log è 11g puro).
-# Permette al chiamante di sapere se la chiamata ha letto l'intero file.
-if [ "$AWK_PREFILTER" = "1" ]; then
-    FULL_SCAN="false"
-else
+# full_scan_performed=true solo quando è stato letto l'intero file senza filtri.
+# Con --since (prefilter=1), --code con occorrenze (prefilter=2) o
+# --code senza occorrenze (prefilter=3): la scansione è parziale o assente.
+if [ "$AWK_PREFILTER" = "0" ]; then
     FULL_SCAN="true"
+else
+    FULL_SCAN="false"
 fi
 
 # --- BUG-05 / R-11: rilevamento log non ruotato -------------------------------

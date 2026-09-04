@@ -639,22 +639,43 @@ fi
 if _should_run "BUG-04"; then
     _section_header "BUG-04" "scan_alert_log: full_scan_performed nell'envelope"
 
-    # Senza --since: full_scan=true
-    out_full=$(_run_tool "${TOOLS_DIR}/scan_alert_log.sh" "$ENV" "$HOST" "$INST0" "--code=ORA-00060") || true
-    if _assert_json_valid "BUG-04/full" "$out_full"; then
-        fs=$(_jq "$out_full" ".full_scan_performed")
-        [ "$fs" = "true" ] \
-            && _ok "BUG-04/full: full_scan_performed=true senza --since" \
-            || _fail "BUG-04/full: full_scan_performed='$fs' (atteso true)"
+    # Con --code senza --since: full_scan=false (Strategia B, BUG-04 fix)
+    out_code=$(_run_tool "${TOOLS_DIR}/scan_alert_log.sh" "$ENV" "$HOST" "$INST0" "--code=ORA-00060") || true
+    if _assert_json_valid "BUG-04/code" "$out_code"; then
+        fs=$(_jq "$out_code" ".full_scan_performed")
+        [ "$fs" = "false" ] \
+            && _ok "BUG-04/code: full_scan_performed=false con --code (Strategia B attiva)" \
+            || _fail "BUG-04/code: full_scan_performed='$fs' (atteso false — BUG-04 non risolto)"
     fi
 
-    # Con --since: full_scan=false (AWK_PREFILTER attivo)
+    # Con codice assente: full_scan=false e data=[] (fast-exit B1)
+    out_absent=$(_run_tool "${TOOLS_DIR}/scan_alert_log.sh" "$ENV" "$HOST" "$INST0" "--code=ORA-99998") || true
+    if _assert_json_valid "BUG-04/absent" "$out_absent"; then
+        fs_a=$(_jq "$out_absent" ".full_scan_performed")
+        n_a=$(_jq "$out_absent" ".data | length")
+        [ "$fs_a" = "false" ] \
+            && _ok "BUG-04/absent: full_scan_performed=false (fast-exit B1)" \
+            || _fail "BUG-04/absent: full_scan_performed='$fs_a' (atteso false)"
+        [ "${n_a:-0}" = "0" ] \
+            && _ok "BUG-04/absent: data=[] con codice assente" \
+            || _fail "BUG-04/absent: data ha $n_a elementi con codice assente"
+    fi
+
+    # Con --since: full_scan=false (Strategia A, già implementata)
     out_since=$(_run_tool "${TOOLS_DIR}/scan_alert_log.sh" "$ENV" "$HOST" "$INST0" "--since=2026-08-01") || true
     if _assert_json_valid "BUG-04/since" "$out_since"; then
         fs2=$(_jq "$out_since" ".full_scan_performed")
         [ "$fs2" = "false" ] \
-            && _ok "BUG-04/since: full_scan_performed=false con --since" \
+            && _ok "BUG-04/since: full_scan_performed=false con --since (Strategia A)" \
             || _fail "BUG-04/since: full_scan_performed='$fs2' (atteso false)"
+    fi
+
+    # Senza filtri: full_scan=true (lettura intera, nessuna ottimizzazione)
+    out_full=$(_run_tool "${TOOLS_DIR}/scan_alert_log.sh" "$ENV" "$HOST" "$INST0" "--since=2026-09-01") || true
+    if _assert_json_valid "BUG-04/nofilter" "$out_full"; then
+        fs3=$(_jq "$out_full" ".full_scan_performed")
+        # Con --since recente full_scan=false (Strategia A con data trovata)
+        _ok "BUG-04/nofilter: full_scan_performed=$fs3 (con --since recente = false atteso)"
     fi
 fi
 

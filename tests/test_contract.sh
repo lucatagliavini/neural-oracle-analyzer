@@ -600,6 +600,70 @@ test_b2_strftime_quick() {
     fi
 }
 
+# --- Test: BUG-04 pre-filtraggio --code (fast-exit + file ridotto) -------------
+
+test_bug04_code_prefilter_quick() {
+    local script="$1"
+    printf "\n  [BUG-04: --code fast-exit con file log fake]\n"
+
+    # Crea un log fake in formato ISO (12c+) con alcune righe ORA-
+    local fake_log
+    fake_log=$(mktemp /tmp/test_bug04_XXXXXX.log)
+    cat > "$fake_log" << 'FAKELOG'
+2026-09-01T08:00:00.000000+02:00
+ORA-00060: deadlock detected
+2026-09-01T09:00:00.000000+02:00
+VITAWFST(13):ORA-01555: snapshot too old
+2026-09-01T10:00:00.000000+02:00
+Background process info
+FAKELOG
+
+    # Sovrascrivi temporaneamente la logica NFS con un file locale
+    # Testiamo solo le funzioni di pre-filtraggio via bash diretto (non il tool intero)
+
+    # Test B1: codice assente → grep -cE deve restituire 0
+    # Nota: grep -cE stampa il count anche con exit 1 (0 match); non usare || echo 0
+    local absent_count
+    absent_count=$(LC_ALL=C grep -cE "ORA-0*4030" "$fake_log" 2>/dev/null; true)
+    if [ "${absent_count:-0}" -eq 0 ]; then
+        _ok "BUG-04/B1: grep -cE ORA-04030 su log senza quel codice → 0 (fast-exit corretto)"
+    else
+        _fail "BUG-04/B1: grep -cE ORA-04030 ha trovato $absent_count (log fake errato?)"
+    fi
+
+    # Test B2: codice presente → grep -cE deve restituire >0
+    local present_count
+    present_count=$(LC_ALL=C grep -cE "ORA-0*60" "$fake_log" 2>/dev/null; true)
+    if [ "${present_count:-0}" -gt 0 ]; then
+        _ok "BUG-04/B2: grep -cE ORA-00060 su log con quel codice → $present_count (file ridotto attivato)"
+    else
+        _fail "BUG-04/B2: grep -cE ORA-00060 non ha trovato il codice (log fake errato?)"
+    fi
+
+    # Test B3: normalizzazione pattern ORA-0*N — ORA-60 deve trovare ORA-00060
+    # Il pattern "ORA-0*60" (regex) trova sia "ORA-60" che "ORA-00060"
+    local check_norm
+    check_norm=$(LC_ALL=C grep -cE "ORA-0*60" "$fake_log" 2>/dev/null; true)
+    if [ "${check_norm:-0}" -gt 0 ]; then
+        _ok "BUG-04/B3: pattern ORA-0*60 trova ORA-00060 (normalizzazione zero-padding OK)"
+    else
+        _fail "BUG-04/B3: pattern ORA-0*60 non trova ORA-00060"
+    fi
+
+    # Test B4: full_scan_performed=false con --code (log NFS non disponibile → skip)
+    # Questo richiederebbe un log NFS reale; verifichiamo solo che il tool accetti --code
+    local out rc=0
+    out=$("$script" "TEST" "axnporadb41" "NP41CDB0" "--code=ORA-99999" 2>/dev/null) || rc=$?
+    # Può essere log_not_found (no NFS) o ok con data:[] — non connection_failed
+    if [ "$rc" = "0" ] || [ "$rc" = "1" ]; then
+        _ok "BUG-04/B4: --code=ORA-99999 non ha causato crash (rc=$rc)"
+    else
+        _fail "BUG-04/B4: --code=ORA-99999 ha restituito rc=$rc inatteso"
+    fi
+
+    rm -f "$fake_log"
+}
+
 # --- Test: parametri opzionali tool OS ----------------------------------------
 
 test_os_tool_params() {
@@ -655,10 +719,11 @@ run_test() {
     # Test hostname traversal (R-10) — no connessione, eseguiti anche in --quick
     test_hostname_traversal "$script" "$host_only" "$env_only"
 
-    # Test ora_errors.json + --until (C3) + R-07 — no connessione, eseguiti anche in --quick
+    # Test ora_errors.json + --until (C3) + R-07 + BUG-04 — no connessione, anche in --quick
     if [ "$tool_name" = "scan_alert_log" ]; then
         test_ora_errors_coverage "$script"
         test_scan_alert_log_until_quick "$script"
+        test_bug04_code_prefilter_quick "$script"
     fi
 
     # B2: strftime disponibile (no connessione)
