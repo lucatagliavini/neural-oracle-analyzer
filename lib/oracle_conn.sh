@@ -87,6 +87,14 @@ get_prod_noprod() {
     if [ "$1" = "PROD" ]; then echo "prod"; else echo "noprod"; fi
 }
 
+# --- Validazione formato hostname (R-10) ---------------------------------------
+# Restituisce 0 se valido, 1 se non valido.
+# Formato: solo lettere minuscole, cifre, trattini (DNS hostname label).
+# Previene path traversal tipo "../../etc" nei path NFS e nel target SSH.
+validate_hostname() {
+    printf '%s' "$1" | grep -qE '^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$'
+}
+
 # --- Validazione argomenti standard dei tool ----------------------------------
 
 # Valida ENVIRONMENT, HOSTNAME e INSTANCE_NAME in un'unica chiamata.
@@ -108,6 +116,17 @@ validate_args() {
     if [ -z "$host" ]; then
         build_error_json "$tool" "$env" "$host" "$inst" \
             "invalid_argument" "HOSTNAME obbligatorio" '{"param":"hostname"}'
+        return 2
+    fi
+
+    # R-10: validazione formato hostname per prevenire path traversal.
+    # Formato atteso: solo lettere minuscole, cifre, trattini (DNS-safe).
+    # Esempi validi: axnporadb41, axceoradb02, lxprworkerlana01
+    if ! validate_hostname "$host"; then
+        build_error_json "$tool" "$env" "$host" "$inst" \
+            "invalid_argument" \
+            "HOSTNAME non valido: deve contenere solo lettere minuscole, cifre e trattini" \
+            "{\"param\":\"hostname\",\"received\":\"$host\"}"
         return 2
     fi
 
@@ -165,19 +184,26 @@ build_error_json() {
 # Stampa l'envelope JSON completo su stdout.
 # Argomenti: TOOL ENV HOST INST VERSION STATUS DATA_JSON ERROR_JSON
 # VERSION può essere stringa vuota o "null" → oracle_version: null nel JSON
+# INST può essere stringa vuota o "null" → instance_name: null nel JSON
+# R-12: i tool OS-level passano "null" come stringa per INST; deve diventare null JSON.
 build_envelope() {
     local tool="$1" env="$2" host="$3" inst="$4"
     local version="$5" status="$6" data="$7" error="$8"
     local ts
     ts=$(date -Iseconds 2>/dev/null || date +"%Y-%m-%dT%H:%M:%S%z")
-    local ver_json
+    local ver_json inst_json
     if [ -z "$version" ] || [ "$version" = "null" ]; then
         ver_json="null"
     else
         ver_json="\"$version\""
     fi
-    printf '{"tool":"%s","generated_at":"%s","environment":"%s","hostname":"%s","instance_name":"%s","oracle_version":%s,"status":"%s","data":%s,"error":%s}\n' \
-        "$tool" "$ts" "$env" "$host" "$inst" "$ver_json" "$status" "$data" "$error"
+    if [ -z "$inst" ] || [ "$inst" = "null" ]; then
+        inst_json="null"
+    else
+        inst_json="\"$inst\""
+    fi
+    printf '{"tool":"%s","generated_at":"%s","environment":"%s","hostname":"%s","instance_name":%s,"oracle_version":%s,"status":"%s","data":%s,"error":%s}\n' \
+        "$tool" "$ts" "$env" "$host" "$inst_json" "$ver_json" "$status" "$data" "$error"
 }
 
 # --- Parsing CSV → array JSON -------------------------------------------------
@@ -214,7 +240,9 @@ NR == 1 {
         val = trim(unquote(values[i]))
         if (val == "") {
             printf "\"%s\":null", key
-        } else if (val ~ /^-?[0-9]+(\.[0-9]+)?$/) {
+        } else if (val ~ /^-?[0-9]+(\.[0-9]+)?$/ || val ~ /^-?\.[0-9]+$/) {
+            # R-13: valori come ".18" (punto iniziale senza zero) sono numerici.
+            # Oracle restituisce percent_space_used come ".18" invece di "0.18".
             printf "\"%s\":%s", key, val
         } else {
             gsub(/\\/, "\\\\", val)

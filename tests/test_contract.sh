@@ -420,6 +420,94 @@ test_scan_alert_log_until_quick() {
     else
         _fail "--since > --until non ha restituito invalid_argument (rc=$rc)"
     fi
+
+    # R-07: date semanticamente invalide (mese/giorno fuori range, anno < 2000)
+    printf "  [scan_alert_log R-07: --since=2026-13-45 → invalid_argument]\n"
+    rc=0
+    out=$("$script" "TEST" "axnporadb41" "NP41CDB0" "--since=2026-13-45" 2>/dev/null) || rc=$?
+    if [ "$rc" = "2" ] || ([ "$rc" = "1" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1); then
+        _ok "--since=2026-13-45 (mese 13) → invalid_argument"
+    else
+        _fail "--since=2026-13-45 non ha restituito invalid_argument (rc=$rc)"
+    fi
+
+    printf "  [scan_alert_log R-07: --since=1970-01-01 → invalid_argument]\n"
+    rc=0
+    out=$("$script" "TEST" "axnporadb41" "NP41CDB0" "--since=1970-01-01" 2>/dev/null) || rc=$?
+    if [ "$rc" = "2" ] || ([ "$rc" = "1" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1); then
+        _ok "--since=1970-01-01 (anno < 2000) → invalid_argument"
+    else
+        _fail "--since=1970-01-01 non ha restituito invalid_argument (rc=$rc)"
+    fi
+}
+
+# --- Test: tail_alert_log --lines tetto (R-05) ---------------------------------
+
+test_tail_alert_log_lines() {
+    local script="$1"
+    printf "\n  [tail_alert_log R-05: --lines=0 → invalid_argument]\n"
+    local out rc=0
+    out=$("$script" "TEST" "axnporadb41" "NP41CDB0" "--lines=0" 2>/dev/null) || rc=$?
+    if [ "$rc" = "2" ] || ([ "$rc" = "1" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1); then
+        _ok "--lines=0 → invalid_argument"
+    else
+        _fail "--lines=0 non ha restituito invalid_argument (rc=$rc)"
+    fi
+
+    printf "  [tail_alert_log R-05: --lines=500000 → invalid_argument (sopra tetto)]\n"
+    rc=0
+    out=$("$script" "TEST" "axnporadb41" "NP41CDB0" "--lines=500000" 2>/dev/null) || rc=$?
+    if [ "$rc" = "2" ] || ([ "$rc" = "1" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1); then
+        _ok "--lines=500000 (sopra tetto) → invalid_argument"
+    else
+        _fail "--lines=500000 non ha restituito invalid_argument (rc=$rc)"
+    fi
+}
+
+# --- Test: top_pga_sessions --limit tetto (R-06) ------------------------------
+
+test_top_pga_limit_max() {
+    local script="$1"
+    printf "\n  [top_pga_sessions R-06: --limit=999999 → invalid_argument (sopra tetto)]\n"
+    local out rc=0
+    out=$("$script" "TEST" "axnporadb41" "NP41CDB0" "--limit=999999" 2>/dev/null) || rc=$?
+    if [ "$rc" = "2" ] || ([ "$rc" = "1" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1); then
+        _ok "--limit=999999 (sopra tetto) → invalid_argument"
+    else
+        _fail "--limit=999999 non ha restituito invalid_argument (rc=$rc)"
+    fi
+}
+
+# --- Test: hostname path traversal (R-10) -------------------------------------
+
+test_hostname_traversal() {
+    local script="$1" host_only="${2:-0}" env_only="${3:-0}"
+    [ "$env_only" = "1" ] && return
+    printf "\n  [R-10: hostname path traversal → invalid_argument]\n"
+    local out rc=0
+    if [ "$host_only" = "1" ]; then
+        out=$("$script" "TEST" "../../etc" 2>/dev/null) || rc=$?
+    else
+        out=$("$script" "TEST" "../../etc" "NP41CDB0" 2>/dev/null) || rc=$?
+    fi
+    if [ "$rc" = "2" ] || ([ "$rc" = "1" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1); then
+        _ok "hostname='../../etc' → invalid_argument"
+    else
+        _fail "hostname='../../etc' non ha restituito invalid_argument (rc=$rc)"
+    fi
+
+    # Hostname con lettere MAIUSCOLE (es. "AXNPORADB41") deve essere respinto
+    rc=0
+    if [ "$host_only" = "1" ]; then
+        out=$("$script" "TEST" "AXNPORADB41" 2>/dev/null) || rc=$?
+    else
+        out=$("$script" "TEST" "AXNPORADB41" "NP41CDB0" 2>/dev/null) || rc=$?
+    fi
+    if [ "$rc" = "2" ] || ([ "$rc" = "1" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1); then
+        _ok "hostname='AXNPORADB41' (maiuscole) → invalid_argument"
+    else
+        _fail "hostname='AXNPORADB41' non ha restituito invalid_argument (rc=$rc)"
+    fi
 }
 
 # --- Test: ora_errors.json contiene i codici critici (BUG-10) -----------------
@@ -544,10 +632,23 @@ run_test() {
     # Test input invalidi (non richiedono connessione)
     test_invalid_inputs "$script" "$tool_name" "$host_only" "$env_only"
 
-    # Test ora_errors.json + --until (C3) — no connessione, eseguiti anche in --quick
+    # Test hostname traversal (R-10) — no connessione, eseguiti anche in --quick
+    test_hostname_traversal "$script" "$host_only" "$env_only"
+
+    # Test ora_errors.json + --until (C3) + R-07 — no connessione, eseguiti anche in --quick
     if [ "$tool_name" = "scan_alert_log" ]; then
         test_ora_errors_coverage "$script"
         test_scan_alert_log_until_quick "$script"
+    fi
+
+    # R-05: tail_alert_log tetto su --lines (no connessione)
+    if [ "$tool_name" = "tail_alert_log" ]; then
+        test_tail_alert_log_lines "$script"
+    fi
+
+    # R-06: top_pga_sessions tetto su --limit (no connessione)
+    if [ "$tool_name" = "top_pga_sessions" ]; then
+        test_top_pga_limit_max "$script"
     fi
 
     if [ "$QUICK" = "0" ]; then

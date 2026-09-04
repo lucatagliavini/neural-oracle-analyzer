@@ -73,6 +73,14 @@ if [ -z "$HOST" ]; then
         "invalid_argument" "HOSTNAME obbligatorio" '{"param":"hostname"}'
     exit 2
 fi
+# R-10: validazione formato hostname
+if ! validate_hostname "$HOST"; then
+    build_error_json "$TOOL" "$ENV" "$HOST" "null" \
+        "invalid_argument" \
+        "HOSTNAME non valido: deve contenere solo lettere minuscole, cifre e trattini" \
+        "{\"param\":\"hostname\",\"received\":\"$HOST\"}"
+    exit 2
+fi
 
 if ! printf '%s' "$SAMPLES" | grep -qE '^[0-9]+$' || [ "$SAMPLES" -lt 1 ]; then
     build_error_json "$TOOL" "$ENV" "$HOST" "null" \
@@ -159,6 +167,16 @@ NF < 5 { next }   # righe malformate / continuazioni
 END { printf "]" }
 ')
 
+# R-09: se --fs è specificato ma la lista filesystem è vuota, il mount non esiste.
+# Restituiamo un errore esplicito invece di lista vuota silente.
+if [ -n "$FS_FILTER" ] && [ "$FS_JSON" = "[]" ]; then
+    build_error_json "$TOOL" "$ENV" "$HOST" "null" \
+        "invalid_argument" \
+        "Mount point '${FS_FILTER}' non trovato sul server ${HOST}" \
+        "{\"param\":\"fs\",\"received\":\"${FS_FILTER}\"}"
+    exit 1
+fi
+
 # --- iostat (opzionale) -------------------------------------------------------
 # BUG-15: distinguere io_available (iostat presente sul sistema) da
 # io_collected (campioni effettivamente raccolti e non vuoti).
@@ -186,7 +204,6 @@ else
     }
 
     if [ "$IO_AVAILABLE" = "true" ] && [ -n "$RAW_IO" ]; then
-        IO_COLLECTED="true"
         IO_PARSE=$(printf '%s' "$RAW_IO" | awk \
             -v os_type="$OS_TYPE" -v ts_base="$TS_NOW" '
 BEGIN {
@@ -267,6 +284,12 @@ END {
 ')
         # Estrai array e costruisci summary per device
         IO_JSON=$(printf '%s' "$IO_PARSE" | tr -d '\n' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
+        # R-03: io_collected=true solo se l'array contiene effettivamente campioni.
+        # Se il parser non ha trovato device validi nell'output di iostat (es. AIX
+        # con formato non riconosciuto), IO_JSON resta "[]" e io_collected rimane false.
+        if [ "$IO_JSON" != "[]" ] && [ -n "$IO_JSON" ]; then
+            IO_COLLECTED="true"
+        fi
 
         # Summary I/O per device in awk
         SUMMARY_IO=$(printf '%s' "$RAW_IO" | awk \

@@ -73,6 +73,14 @@ if [ -z "$HOST" ]; then
         "invalid_argument" "HOSTNAME obbligatorio" '{"param":"hostname"}'
     exit 2
 fi
+# R-10: validazione formato hostname
+if ! validate_hostname "$HOST"; then
+    build_error_json "$TOOL" "$ENV" "$HOST" "null" \
+        "invalid_argument" \
+        "HOSTNAME non valido: deve contenere solo lettere minuscole, cifre e trattini" \
+        "{\"param\":\"hostname\",\"received\":\"$HOST\"}"
+    exit 2
+fi
 
 # 3. --samples e --interval devono essere interi positivi
 if ! printf '%s' "$SAMPLES" | grep -qE '^[0-9]+$' || [ "$SAMPLES" -lt 1 ]; then

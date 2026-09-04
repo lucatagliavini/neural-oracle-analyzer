@@ -87,6 +87,42 @@ if [ -n "$FILTER_SINCE" ] && [ -n "$FILTER_UNTIL" ] && [ "$FILTER_SINCE" \> "$FI
     exit 2
 fi
 
+# R-07: validazione semantica delle date.
+# Regex YYYY-MM-DD accetta 2026-13-45 (mese 13, giorno 45) o 1970-01-01.
+# - Date con mese > 12 o giorno > 31: restituire invalid_argument.
+# - Date prima del 2000: data probabilmente errata (i log Oracle iniziano dal ~2000),
+#   restituire invalid_argument con messaggio esplicativo.
+_validate_date_semantic() {
+    local param_name="$1" val="$2"
+    local year month day
+    year=$(  printf '%s' "$val" | cut -d- -f1)
+    month=$( printf '%s' "$val" | cut -d- -f2)
+    day=$(   printf '%s' "$val" | cut -d- -f3)
+    # Rimuovi zero-padding per confronto numerico (evita ottali in bash)
+    month=$(( 10#$month ))
+    day=$(   10#$day )
+    if [ "$month" -lt 1 ] || [ "$month" -gt 12 ]; then
+        build_error_json "$TOOL" "$ENV" "$HOST" "$INST" \
+            "invalid_argument" "--${param_name}: mese ${month} non valido (1-12)" \
+            "{\"param\":\"${param_name}\",\"received\":\"$val\"}"
+        exit 2
+    fi
+    if [ "$day" -lt 1 ] || [ "$day" -gt 31 ]; then
+        build_error_json "$TOOL" "$ENV" "$HOST" "$INST" \
+            "invalid_argument" "--${param_name}: giorno ${day} non valido (1-31)" \
+            "{\"param\":\"${param_name}\",\"received\":\"$val\"}"
+        exit 2
+    fi
+    if [ "$year" -lt 2000 ]; then
+        build_error_json "$TOOL" "$ENV" "$HOST" "$INST" \
+            "invalid_argument" "--${param_name}: anno ${year} non plausibile per alert log Oracle (>= 2000 atteso)" \
+            "{\"param\":\"${param_name}\",\"received\":\"$val\"}"
+        exit 2
+    fi
+}
+[ -n "$FILTER_SINCE" ] && _validate_date_semantic "since" "$FILTER_SINCE"
+[ -n "$FILTER_UNTIL" ] && _validate_date_semantic "until" "$FILTER_UNTIL"
+
 # --- Trova alert log ----------------------------------------------------------
 
 LOG_PATH=$(find_alert_log "$HOST" "$INST" "$ENV")
@@ -205,10 +241,11 @@ function normalize_code(c,    num) {
     pdb  = extract_pdb($0)
     line = $0
 
-    # Filtro per PDB: "--pdb=CDB" mostra solo righe senza prefisso PDB (CDB root)
+    # Filtro per PDB: "--pdb=CDB" o "--pdb=CDB$ROOT" mostra solo righe senza prefisso PDB (CDB root)
+    # R-08: CDB$ROOT è il nome Oracle ufficiale; supportiamo entrambi gli alias.
     if (filter_pdb != "") {
         fp = toupper(filter_pdb)
-        if (fp == "CDB") {
+        if (fp == "CDB" || fp == "CDB$ROOT") {
             if (pdb != "") next
         } else {
             if (toupper(pdb) != fp) next
@@ -347,6 +384,16 @@ function normalize_code(c,    num) {
     return "ORA-" num
 }
 
+# Converte una stringa YYYY-MM-DDTHH:MM:SS in un giorno-assoluto approssimato (Julian day).
+# Usato per calcolare la finestra temporale e occurrences_per_day (R-16).
+function date_to_days(d,    y,m,day) {
+    y   = substr(d, 1, 4) + 0
+    m   = substr(d, 6, 2) + 0
+    day = substr(d, 9, 2) + 0
+    if (y == 0) return 0
+    return y * 365 + int((y-1)/4) + int((m-1) * 30.44) + day
+}
+
 NF >= 5 {
     code  = $1
     pdb   = $2
@@ -371,10 +418,41 @@ NF >= 5 {
     if (n_smp >= 2 && s1 != "") samp_arr = samp_arr ",\"" s1 "\""
     samp_arr = samp_arr "]"
 
+    # R-16: occurrences_per_day e severity_effective.
+    # La severita di base e per codice (qualitativa); severity_effective scala sul volume.
+    # Soglie: >50/giorno o count>500 → effective=critical; >10/giorno o count>100 → warning;
+    # altrimenti = stessa severita di base (o "unclassified" se sev e null).
+    occpd = "null"
+    sev_eff = sev
+    if (fs != "" && fs != "unknown" && ls != "" && cnt > 0) {
+        d1 = date_to_days(fs)
+        d2 = date_to_days(ls)
+        span = (d2 >= d1 ? d2 - d1 : 0)
+        if (span >= 1) {
+            opd = cnt / span
+            occpd = sprintf("%.1f", opd)
+            # Eleva la severita se il volume e elevato
+            if (opd > 50 || cnt > 500) {
+                sev_eff = "\"critical\""
+            } else if (opd > 10 || cnt > 100) {
+                if (sev == "null" || sev == "\"ignorable\"") sev_eff = "\"warning\""
+            }
+        } else {
+            # Stessa data → tutti nello stesso giorno
+            occpd = sprintf("%.1f", cnt + 0)
+            if (cnt > 500) sev_eff = "\"critical\""
+            else if (cnt > 100) {
+                if (sev == "null" || sev == "\"ignorable\"") sev_eff = "\"warning\""
+            }
+        }
+    }
+    # Se severity di base e null → "unclassified" (BUG-10 residuo)
+    if (sev == "null") sev_eff = "\"unclassified\""
+
     if (!first) printf ","
     first = 0
-    printf "{\"code\":\"%s\",\"pdb_name\":%s,\"description\":%s,\"category\":%s,\"severity\":%s,\"count\":%d,\"first_seen\":%s,\"last_seen\":%s,\"samples\":%s}\n",
-        code, pdb_json, desc, cat, sev, cnt, fs_json, ls_json, samp_arr
+    printf "{\"code\":\"%s\",\"pdb_name\":%s,\"description\":%s,\"category\":%s,\"severity\":%s,\"severity_effective\":%s,\"occurrences_per_day\":%s,\"count\":%d,\"first_seen\":%s,\"last_seen\":%s,\"samples\":%s}\n",
+        code, pdb_json, desc, cat, sev, sev_eff, occpd, cnt, fs_json, ls_json, samp_arr
 }
 END {
     print "]"
@@ -390,19 +468,19 @@ else
     FULL_SCAN="true"
 fi
 
-# --- BUG-05: rilevamento log non ruotato -------------------------------------
+# --- BUG-05 / R-11: rilevamento log non ruotato -------------------------------
 # Aggiunge log_start_date (prima riga ISO del file) all'envelope.
-# Il chiamante può confrontarlo con startup_time di identify_instance:
-# se log_start_date << startup_time, il log contiene eventi di incarnazioni passate.
+# R-11: log_start_date è una proprietà del FILE, non del filtro.
+# Deve essere sempre valorizzata, anche quando si usa --since.
+# La vecchia logica che la ometteva con --since era sbagliata: è proprio
+# quando si filtra che serve sapere da quando parte il log, per capire
+# se il filtro copre tutta la storia o solo una parte.
 # Strategia: grep -m1 sul file è istantaneo anche su 400 MB (si ferma alla prima hit).
-# Eseguito solo se FILTER_SINCE non è impostato (altrimenti stiamo già in una finestra).
 LOG_START_DATE="null"
-if [ -z "$FILTER_SINCE" ]; then
-    _first_iso=$(LC_ALL=C grep -m1 -oE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' \
-        "$LOG_PATH" 2>/dev/null | head -1)
-    if [ -n "$_first_iso" ]; then
-        LOG_START_DATE="\"${_first_iso}\""
-    fi
+_first_iso=$(LC_ALL=C grep -m1 -oE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' \
+    "$LOG_PATH" 2>/dev/null | head -1)
+if [ -n "$_first_iso" ]; then
+    LOG_START_DATE="\"${_first_iso}\""
 fi
 
 # Valore JSON per filter_until (null se non impostato)
@@ -415,6 +493,12 @@ fi
 #   log_start_date      — prima data ISO nel log (BUG-05)
 #   full_scan_performed — se è stato letto l'intero file (BUG-04)
 #   filter_until        — valore del filtro --until usato, per trasparenza
+# Build dell'envelope con campi extra top-level (BUG-05, R-11, C3).
+# NOTA: data_json può avere newline interni (awk usa print non printf).
+# Per aggiungere i campi extra SOLO alla fine dell'envelope, comprimiamo
+# tutto su una riga prima di applicare il sed, poi riaggiungiamo il newline finale.
 _envelope_base=$(build_envelope "$TOOL" "$ENV" "$HOST" "$INST" "n/a" "ok" "$data_json" "null")
-printf '%s\n' "$_envelope_base" \
+printf '%s' "$_envelope_base" \
+    | tr -d '\n' \
     | sed "s/}$/,\"log_start_date\":${LOG_START_DATE},\"full_scan_performed\":${FULL_SCAN},\"filter_until\":${FILTER_UNTIL_JSON}}/"
+printf '\n'

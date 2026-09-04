@@ -198,6 +198,15 @@ def diagnose_instance(env: str, host: str, inst: str,
             except (ValueError, TypeError):
                 pass
 
+    # --- R-17: flag per istanza OPEN senza PDB applicativi ---
+    if (instance_status == "OPEN" and db_status == "ACTIVE"
+            and pdbs_available and len(pdbs_open) == 0):
+        resource_criticita.append(
+            "Istanza OPEN con zero PDB applicativi in READ WRITE: "
+            "nessun database applicativo disponibile. "
+            "Verificare se l'istanza è in allestimento, dismessa o in stato anomalo."
+        )
+
     # --- Costruzione summary ---
     criticita = fra_criticita + resource_criticita
     if instance_status == "OPEN" and db_status == "ACTIVE":

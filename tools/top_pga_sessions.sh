@@ -22,6 +22,8 @@ HOST="${2:-}"
 INST="${3:-}"
 
 LIMIT=20
+# R-06: tetto massimo per evitare output da 230 KB con limit=999999.
+MAX_LIMIT=500
 for arg in "${@:4}"; do
     case "$arg" in
         --limit=*)
@@ -30,6 +32,12 @@ for arg in "${@:4}"; do
                 build_error_json "$TOOL" "$ENV" "$HOST" "$INST" \
                     "invalid_argument" "--limit deve essere un intero positivo" \
                     "{\"param\":\"limit\",\"received\":\"$val\"}"
+                exit 2
+            fi
+            if [ "$val" -gt "$MAX_LIMIT" ]; then
+                build_error_json "$TOOL" "$ENV" "$HOST" "$INST" \
+                    "invalid_argument" "--limit non può superare ${MAX_LIMIT}" \
+                    "{\"param\":\"limit\",\"received\":\"$val\",\"max\":${MAX_LIMIT}}"
                 exit 2
             fi
             LIMIT="$val"

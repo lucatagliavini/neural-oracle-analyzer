@@ -47,6 +47,10 @@ validate_args "$TOOL" "$ENV" "$HOST" "$INST" || exit $?
 # Unica connessione SSH: versione + dati
 # BUG-01: aggiunto ROWNUM <= N per limitare le righe restituite e ridurre il payload.
 # Su istanze con 1000+ sessioni, senza limite l'output era >100 KB e saturava il context.
+# R-01/R-14: la stringa SQL 'CDB$ROOT' non può stare dentro single-quoted printf perché
+# il $ROOT verrebbe espanso da bash (a stringa vuota) nella parte unquoted.
+# Soluzione: passare la stringa come variabile separata che printf sostituisce con %s.
+_CDB_ROOT="'CDB\$ROOT'"
 sql_block=$(printf \
 'SET COLSEP ","
 SET FEEDBACK OFF
@@ -62,7 +66,7 @@ SET HEADING ON
 SET PAGESIZE 9999
 SELECT * FROM (
   SELECT s.con_id,
-         NVL(p.pdb_name, 'CDB$ROOT') AS pdb_name,
+         NVL(p.pdb_name, %s) AS pdb_name,
          s.username, s.status,
          pr.pga_used_mem, pr.pga_alloc_mem
   FROM v$session s
@@ -72,7 +76,7 @@ SELECT * FROM (
   ORDER BY pr.pga_alloc_mem DESC
 ) WHERE ROWNUM <= %d;
 EXIT
-' "$LIMIT")
+' "$_CDB_ROOT" "$LIMIT")
 
 stderr_tmp=$(mktemp)
 raw_output=$(run_sqlplus_raw "$HOST" "$INST" "$sql_block" 2>"$stderr_tmp")

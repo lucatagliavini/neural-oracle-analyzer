@@ -38,6 +38,14 @@ if [ -z "$HOST" ]; then
         "invalid_argument" "HOSTNAME obbligatorio" '{"param":"hostname"}'
     exit 2
 fi
+# R-10: validazione formato hostname
+if ! validate_hostname "$HOST"; then
+    build_error_json "$TOOL" "$ENV" "$HOST" "" \
+        "invalid_argument" \
+        "HOSTNAME non valido: deve contenere solo lettere minuscole, cifre e trattini" \
+        "{\"param\":\"hostname\",\"received\":\"$HOST\"}"
+    exit 2
+fi
 
 # 3. Recupera lista env file CDB via SSH (non richiede sqlplus)
 #    Logica remota (ksh-compatibile):

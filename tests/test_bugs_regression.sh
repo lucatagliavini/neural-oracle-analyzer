@@ -195,6 +195,18 @@ ALL_BUGS=(
     "BUG-06:list_known_instances: campo resident"
     "BUG-07:tool NFS: oracle_version=n/a"
     "BUG-12:sessions: scope e total documentati"
+    "R-01:pga_by_pdb_session: dati presenti (no data:[] silenzioso)"
+    "R-05:tail_alert_log: tetto su --lines"
+    "R-06:top_pga_sessions: tetto su --limit"
+    "R-07:scan_alert_log: date semanticamente invalide respinte"
+    "R-08:scan_alert_log: CDB\$ROOT come alias per --pdb"
+    "R-10:hostname path traversal respinto"
+    "R-11:scan_alert_log: log_start_date sempre valorizzata (anche con --since)"
+    "R-12:tool OS: instance_name=null JSON (non stringa)"
+    "R-13:check_fra_usage: tipi coerenti (size come intero)"
+    "R-15:check_resource_limits: scope nell'envelope"
+    "R-16:scan_alert_log: severity_effective e occurrences_per_day"
+    "R-17:diagnose_instance: flag per istanza OPEN senza PDB applicativi"
 )
 
 if [ "$LIST_ONLY" = "1" ]; then
@@ -574,18 +586,32 @@ PYEOF
 fi
 
 # ---------------------------------------------------------------------------
-# BUG-05 — scan_alert_log: log_start_date nell'envelope
+# BUG-05 / R-11 — scan_alert_log: log_start_date nell'envelope
 # ---------------------------------------------------------------------------
-if _should_run "BUG-05"; then
-    _section_header "BUG-05" "scan_alert_log: log_start_date nell'envelope top-level"
+if _should_run "BUG-05" || _should_run "R-11"; then
+    _section_header "BUG-05/R-11" "scan_alert_log: log_start_date sempre valorizzata (proprietà del file, non del filtro)"
 
+    # Con --since: log_start_date deve essere valorizzata (R-11 — è proprietà del file)
     out=$(_run_tool "${TOOLS_DIR}/scan_alert_log.sh" "$ENV" "$HOST" "$INST0" "--code=ORA-00060" "--since=2026-08-01") || true
-    if _assert_json_valid "BUG-05/con-since" "$out"; then
-        # Con --since: log_start_date deve essere null (non calcolato)
+    if _assert_json_valid "BUG-05/R-11/con-since" "$out"; then
         lsd=$(_jq "$out" ".log_start_date")
-        [ "$lsd" = "null" ] \
-            && _ok "BUG-05/con-since: log_start_date=null quando --since è impostato" \
-            || _fail "BUG-05/con-since: log_start_date='$lsd' con --since (atteso null)"
+        if [ -n "$lsd" ] && [ "$lsd" != "null" ]; then
+            if echo "$lsd" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}'; then
+                _ok "R-11/con-since: log_start_date='$lsd' valorizzata anche con --since"
+            else
+                _fail "R-11/con-since: log_start_date='$lsd' formato non ISO"
+            fi
+        else
+            _skip "R-11/con-since: log_start_date=null (log 11g puro o NFS assente)"
+        fi
+        # I campi envelope extra non devono comparire nei singoli oggetti del data array
+        n_data=$(_jq "$out" ".data | length")
+        if [ "${n_data:-0}" -gt 0 ]; then
+            log_in_row=$(_jq "$out" ".data[0] | has(\"log_start_date\")")
+            [ "$log_in_row" = "false" ] \
+                && _ok "BUG-05/R-11: log_start_date NON in data[0] (solo nell'envelope top-level)" \
+                || _fail "BUG-05/R-11: log_start_date in data[0] (bug: nel singolo record invece che nell'envelope)"
+        fi
     fi
 
     out2=$(_run_tool "${TOOLS_DIR}/scan_alert_log.sh" "$ENV" "$HOST" "$INST0" "--code=ORA-00060") || true
@@ -894,6 +920,224 @@ PYEOF
         # os_type deve essere aix
         os_type=$(_jq "$python_out" ".summary.os_type")
         _ok "diagnose_os_pressure: os_type=$os_type"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# R-01 — pga_by_pdb_session: dati presenti, non data:[] silenzioso
+# ---------------------------------------------------------------------------
+if _should_run "R-01"; then
+    _section_header "R-01" "pga_by_pdb_session: data[] non vuoto su istanza con sessioni attive"
+
+    # Criterio dal PROTOCOLLO: data non vuoto quando pga_sga_by_pdb restituisce PDB con pga_bytes > 0
+    out_sess=$(_run_tool "${TOOLS_DIR}/pga_by_pdb_session.sh" "$ENV" "$HOST" "$INST1") || true
+    out_sga=$(_run_tool "${TOOLS_DIR}/pga_sga_by_pdb.sh" "$ENV" "$HOST" "$INST1") || true
+
+    if _assert_json_valid "R-01/pga_by_pdb_session" "$out_sess" && _assert_json_valid "R-01/pga_sga_by_pdb" "$out_sga"; then
+        # pga_sga_by_pdb deve avere almeno un PDB con pga_bytes > 0 (controprova)
+        n_sga=$(_jq "$out_sga" '.data | length')
+        [ "${n_sga:-0}" -gt 0 ] \
+            && _ok "R-01: pga_sga_by_pdb ha $n_sga PDB (sessioni attive)" \
+            || _skip "R-01: pga_sga_by_pdb vuoto — sessioni non attive al momento"
+
+        # pga_by_pdb_session non deve essere vuoto se pga_sga_by_pdb ha dati
+        n_sess=$(_jq "$out_sess" '.data | length')
+        if [ "${n_sga:-0}" -gt 0 ]; then
+            [ "${n_sess:-0}" -gt 0 ] \
+                && _ok "R-01: pga_by_pdb_session ha $n_sess sessioni (data non vuoto)" \
+                || _fail "R-01: pga_by_pdb_session data:[] con sessioni attive — regressione critica"
+        fi
+
+        # oracle_version deve essere valorizzato (non null) — segnale di query riuscita
+        ov=$(_jq "$out_sess" ".oracle_version")
+        [ -n "$ov" ] && [ "$ov" != "null" ] \
+            && _ok "R-01: oracle_version=$ov (query eseguita correttamente)" \
+            || _fail "R-01: oracle_version=null (query non eseguita o fallita)"
+
+        # CDB$ROOT deve essere presente nei risultati (BUG-13)
+        has_root=$(_jq "$out_sess" '[.data[] | select(.pdb_name == "CDB$ROOT")] | length')
+        [ "${has_root:-0}" -gt 0 ] \
+            && _ok "R-01/BUG-13: $has_root sessioni su CDB\$ROOT incluse" \
+            || _skip "R-01/BUG-13: nessuna sessione CDB\$ROOT al momento (plausibile)"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# R-07 — scan_alert_log: date semanticamente invalide respinte
+# ---------------------------------------------------------------------------
+if _should_run "R-07"; then
+    _section_header "R-07" "scan_alert_log: date con mese/giorno invalidi o anno < 2000 → invalid_argument"
+
+    for bad_date in "2026-13-45" "2026-01-99" "1999-12-31"; do
+        out=$(_run_tool "${TOOLS_DIR}/scan_alert_log.sh" \
+            "$ENV" "$HOST" "$INST0" "--since=${bad_date}" 2>/dev/null) || rc=$?
+        rc=0; out=$("${TOOLS_DIR}/scan_alert_log.sh" "$ENV" "$HOST" "$INST0" "--since=${bad_date}" 2>/dev/null) || rc=$?
+        if [ "$rc" = "2" ] || _jqe "$out" '.error.code == "invalid_argument"'; then
+            _ok "R-07: --since=${bad_date} → invalid_argument"
+        else
+            _fail "R-07: --since=${bad_date} non ha restituito invalid_argument (rc=$rc)"
+        fi
+    done
+fi
+
+# ---------------------------------------------------------------------------
+# R-08 — scan_alert_log: pdb="CDB$ROOT" funziona come alias "CDB"
+# ---------------------------------------------------------------------------
+if _should_run "R-08"; then
+    _section_header "R-08" "scan_alert_log: --pdb=CDB e --pdb=CDB\$ROOT devono trovare gli stessi risultati"
+
+    out_cdb=$(_run_tool "${TOOLS_DIR}/scan_alert_log.sh" \
+        "$ENV" "$HOST" "$INST1" "--pdb=CDB" "--since=2026-07-01") || true
+    out_root=$(_run_tool "${TOOLS_DIR}/scan_alert_log.sh" \
+        "$ENV" "$HOST" "$INST1" "--pdb=CDB\$ROOT" "--since=2026-07-01") || true
+
+    if _assert_json_valid "R-08/CDB" "$out_cdb" && _assert_json_valid "R-08/CDB\$ROOT" "$out_root"; then
+        n_cdb=$(_jq "$out_cdb" '.data | length')
+        n_root=$(_jq "$out_root" '.data | length')
+        if [ "$n_cdb" = "$n_root" ]; then
+            _ok "R-08: --pdb=CDB e --pdb=CDB\$ROOT trovano stessi gruppi ($n_cdb)"
+        else
+            _fail "R-08: --pdb=CDB=$n_cdb gruppi vs --pdb=CDB\$ROOT=$n_root — diversi"
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# R-12 — tool OS: instance_name = null JSON (non stringa)
+# ---------------------------------------------------------------------------
+if _should_run "R-12"; then
+    _section_header "R-12" "tool OS: instance_name è JSON null (non stringa 'null')"
+
+    out=$(_run_tool "${TOOLS_DIR}/os_cpu_stats.sh" "$ENV" "$HOST" "--samples=1" "--interval=0") || true
+    if _assert_json_valid "R-12/os_cpu_stats" "$out"; then
+        _assert_status_ok "R-12/os_cpu_stats" "$out"
+        # instance_name deve essere null JSON, non la stringa "null"
+        if _jqe "$out" ".instance_name == null"; then
+            _ok "R-12: os_cpu_stats instance_name=null (JSON null, non stringa)"
+        else
+            inst=$(_jq "$out" ".instance_name")
+            _fail "R-12: os_cpu_stats instance_name='$inst' (atteso null JSON)"
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# R-13 — check_fra_usage: tipi coerenti
+# ---------------------------------------------------------------------------
+if _should_run "R-13"; then
+    _section_header "R-13" "check_fra_usage: db_recovery_file_dest_size come intero, non stringa"
+
+    out=$(_run_tool "${TOOLS_DIR}/check_fra_usage.sh" "$ENV" "$HOST" "$INST1") || true
+    if _assert_json_valid "R-13" "$out"; then
+        # db_recovery_file_dest_size in fra_status deve essere un intero
+        size_val=$(_jq "$out" '[.data[] | select(.source=="fra_status")] | first | .db_recovery_file_dest_size')
+        if printf '%s' "$size_val" | grep -qE '^[0-9]+$'; then
+            _ok "R-13: fra_status.db_recovery_file_dest_size=$size_val è intero"
+        else
+            _fail "R-13: fra_status.db_recovery_file_dest_size='$size_val' non è intero"
+        fi
+
+        # Coerenza: fra_dest.space_limit e fra_status.db_recovery_file_dest_size devono coincidere
+        space_limit=$(_jq "$out" '[.data[] | select(.source=="fra_dest")] | first | .space_limit')
+        if [ -n "$size_val" ] && [ -n "$space_limit" ] && [ "$size_val" != "null" ] && [ "$space_limit" != "null" ]; then
+            [ "$size_val" = "$space_limit" ] \
+                && _ok "R-13: fra_status.size($size_val) == fra_dest.space_limit($space_limit) — coerenti" \
+                || _fail "R-13: fra_status.size($size_val) ≠ fra_dest.space_limit($space_limit)"
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# R-15 — check_resource_limits: scope nell'envelope top-level
+# ---------------------------------------------------------------------------
+if _should_run "R-15"; then
+    _section_header "R-15" "check_resource_limits: scope='instance_limits' nell'envelope top-level"
+
+    out=$(_run_tool "${TOOLS_DIR}/check_resource_limits.sh" "$ENV" "$HOST" "$INST0") || true
+    if _assert_json_valid "R-15" "$out"; then
+        _assert_status_ok "R-15" "$out"
+
+        # scope deve essere nell'envelope top-level
+        scope_val=$(_jq "$out" ".scope")
+        [ "$scope_val" = "instance_limits" ] \
+            && _ok "R-15: scope='instance_limits' nell'envelope top-level" \
+            || _fail "R-15: scope='$scope_val' (atteso 'instance_limits')"
+
+        # scope NON deve essere nei singoli record data[]
+        n_data=$(_jq "$out" ".data | length")
+        if [ "${n_data:-0}" -gt 0 ]; then
+            scope_in_row=$(_jq "$out" ".data[0] | has(\"scope\")")
+            [ "$scope_in_row" = "false" ] \
+                && _ok "R-15: scope NON in data[0] (solo nell'envelope)" \
+                || _fail "R-15: scope in data[0] (dovrebbe essere solo nell'envelope)"
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# R-16 — scan_alert_log: severity_effective e occurrences_per_day
+# ---------------------------------------------------------------------------
+if _should_run "R-16"; then
+    _section_header "R-16" "scan_alert_log: severity_effective e occurrences_per_day presenti"
+
+    out=$(_run_tool "${TOOLS_DIR}/scan_alert_log.sh" \
+        "$ENV" "$HOST" "$INST1" "--since=2025-01-01") || true
+    if _assert_json_valid "R-16" "$out"; then
+        n=$(_jq "$out" ".data | length")
+        if [ "${n:-0}" -gt 0 ]; then
+            # Ogni oggetto deve avere severity_effective e occurrences_per_day
+            has_sev_eff=$(_jq "$out" ".data[0] | has(\"severity_effective\")")
+            has_opd=$(_jq "$out" ".data[0] | has(\"occurrences_per_day\")")
+            [ "$has_sev_eff" = "true" ] \
+                && _ok "R-16: severity_effective presente in data[0]" \
+                || _fail "R-16: severity_effective MANCANTE in data[0]"
+            [ "$has_opd" = "true" ] \
+                && _ok "R-16: occurrences_per_day presente in data[0]" \
+                || _fail "R-16: occurrences_per_day MANCANTE in data[0]"
+
+            # severity=null deve diventare severity_effective="unclassified"
+            null_sev_eff=$(_jq "$out" '[.data[] | select(.severity == null) | select(.severity_effective != "unclassified")] | length')
+            [ "${null_sev_eff:-0}" = "0" ] \
+                && _ok "R-16: tutti i codici con severity=null hanno severity_effective=unclassified" \
+                || _fail "R-16: $null_sev_eff codici con severity=null ma severity_effective≠unclassified"
+        else
+            _skip "R-16: nessun errore trovato dal 2025-01-01 su $INST1"
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# R-17 — diagnose_instance: flag per istanza OPEN senza PDB applicativi
+# ---------------------------------------------------------------------------
+if _should_run "R-17"; then
+    _section_header "R-17" "diagnose_instance: criticità per istanza OPEN con zero PDB applicativi"
+
+    # CE02CDB1 ha 0 PDB READ WRITE — è il caso di test del PROTOCOLLO-COLLAUDO
+    python_out=$(cd "${MCP_DIR}" && "$PYTHON3" - <<'PYEOF' 2>/dev/null
+import sys, json
+sys.path.insert(0, '.')
+from orchestration import diagnose_instance
+r = diagnose_instance("TEST", "axceoradb02", "CE02CDB1", include_raw=False)
+print(json.dumps(r))
+PYEOF
+) || true
+
+    if _assert_json_valid "R-17/CE02CDB1" "$python_out"; then
+        _assert_field_equals "R-17/CE02CDB1" "$python_out" ".status" "ok"
+
+        aperti=$(_jq "$python_out" ".summary.pdbs.aperti_read_write")
+        crit=$(_jq "$python_out" ".summary.criticita | join(\" \")")
+
+        if [ "${aperti:-1}" = "0" ]; then
+            # Zero PDB: la criticità deve includere il flag
+            if echo "$crit" | grep -qi "zero PDB applicativi\|nessun database applicativo"; then
+                _ok "R-17: istanza OPEN con 0 PDB → criticità esplicita"
+            else
+                _fail "R-17: istanza OPEN con 0 PDB → criticità assente o senza il flag atteso"
+            fi
+        else
+            _skip "R-17: CE02CDB1 ha $aperti PDB aperti al momento (stato cambiato?)"
+        fi
     fi
 fi
 

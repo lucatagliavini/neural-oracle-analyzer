@@ -163,9 +163,18 @@ fi
 
 # Escaping JSON per il path (può contenere slash e caratteri speciali)
 fra_dest_json=$(printf '%s' "$fra_dest_param" | sed 's/\\/\\\\/g; s/"/\\"/g')
-fra_size_json=$(printf '%s' "$fra_size_param" | sed 's/\\/\\\\/g; s/"/\\"/g')
 
-fra_status_json="{\"source\":\"fra_status\",\"fra_configured\":${fra_configured},\"db_recovery_file_dest\":\"${fra_dest_json}\",\"db_recovery_file_dest_size\":\"${fra_size_json}\"}"
+# R-13: db_recovery_file_dest_size deve essere un intero (numero JSON), non una stringa.
+# Il valore viene da v$parameter.value che restituisce VARCHAR2 (es. "107374182400").
+# Se è numerico puro → emetterlo senza virgolette; altrimenti → stringa.
+if printf '%s' "$fra_size_param" | grep -qE '^[0-9]+$'; then
+    fra_size_json_val="$fra_size_param"
+else
+    fra_size_esc=$(printf '%s' "$fra_size_param" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    fra_size_json_val="\"${fra_size_esc}\""
+fi
+
+fra_status_json="{\"source\":\"fra_status\",\"fra_configured\":${fra_configured},\"db_recovery_file_dest\":\"${fra_dest_json}\",\"db_recovery_file_dest_size\":${fra_size_json_val}}"
 
 # 7. Concatena le quattro sezioni in un unico array data[].
 #    fra_status è sempre presente come primo elemento.

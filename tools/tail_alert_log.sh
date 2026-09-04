@@ -30,6 +30,9 @@ HOST="${2:-}"
 INST="${3:-}"
 
 LINES=2000
+# R-05: tetto massimo su lines per evitare crash del server MCP con valori enormi.
+# lines=500000 su un log da ~1M righe causava MCP server session expired (ripetibile).
+MAX_LINES=5000
 for arg in "${@:4}"; do
     case "$arg" in
         --lines=*)
@@ -38,6 +41,12 @@ for arg in "${@:4}"; do
                 build_error_json "$TOOL" "$ENV" "$HOST" "$INST" \
                     "invalid_argument" "--lines deve essere un intero positivo" \
                     "{\"param\":\"lines\",\"received\":\"$val\"}"
+                exit 2
+            fi
+            if [ "$val" -gt "$MAX_LINES" ]; then
+                build_error_json "$TOOL" "$ENV" "$HOST" "$INST" \
+                    "invalid_argument" "--lines non può superare ${MAX_LINES} (usa scan_alert_log per analisi su finestre ampie)" \
+                    "{\"param\":\"lines\",\"received\":\"$val\",\"max\":${MAX_LINES}}"
                 exit 2
             fi
             LINES="$val"
