@@ -100,7 +100,7 @@ _validate_date_semantic() {
     day=$(   printf '%s' "$val" | cut -d- -f3)
     # Rimuovi zero-padding per confronto numerico (evita ottali in bash)
     month=$(( 10#$month ))
-    day=$(   10#$day )
+    day=$(( 10#$day ))
     if [ "$month" -lt 1 ] || [ "$month" -gt 12 ]; then
         build_error_json "$TOOL" "$ENV" "$HOST" "$INST" \
             "invalid_argument" "--${param_name}: mese ${month} non valido (1-12)" \

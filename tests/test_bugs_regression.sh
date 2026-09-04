@@ -145,7 +145,9 @@ _assert_field_is_number() {
 
 _assert_field_is_bool() {
     local label="$1" out="$2" jq_path="$3"
-    if _jqe "$out" "$jq_path | booleans"; then
+    # Gotcha: jq -e restituisce exit 1 su valori booleani false.
+    # Usiamo type == "boolean" per evitare il problema con false.
+    if _jqe "$out" "$jq_path | type == \"boolean\""; then
         _ok "$label: $jq_path è un bool"
     else
         local v
