@@ -12,16 +12,17 @@ This file provides guidance to agents when working with code in this repository.
 3. Solo se necessario per la milestone da avviare: leggere il file specs rilevante in [`docs/specs/`](docs/specs/).
 4. Non scrivere codice prima di aver completato i passi 1–2.
 
-**Ultimo file di sessione**: [`docs/sessions/2026-09-12.md`](docs/sessions/2026-09-12.md)
-— Stato: M0–M11 ✅ | BUG-01–15 + R-01–R-17 + B2 tutti risolti | C2/C3 implementati
-— 26 tool MCP attivi su `lxprworkerlana01:8420` | 107 test --quick bash
-— B2: timestamp per campione nei 4 tool OS (strftime gawk + TS_EPOCH)
-— Gotcha 30-32: apostrofi awk, netstat -I AIX, dedup righe netstat -i per iface
-— Proxy HTTP attivo su porta 80 (SSL placeholder commentato)
+**Ultimo file di sessione**: [`docs/sessions/2026-09-13.md`](docs/sessions/2026-09-13.md)
+— Stato: M0–M11 ✅ | tutti i 36 bug BUGS-MCP-ORACLE.md chiusi (R3-01..R3-04, R-02)
+— 26 tool MCP attivi su `lxprworkerlana01:8420` | 137 test --quick bash
+— R3-01: rimossa B2 scan_alert_log | R3-02: MAX_LIMIT=500 pga_by_pdb_session
+— R3-03: severity_escalation_thresholds | R3-04: generated_at UTC in lib/oracle_conn.sh
+— R-02: resident via realpath (symlink RAC) in list_known_instances
+— Gotcha 33-34: gawk -f multi, realpath -m vs readlink -f
 
 ## Project state
 
-M0–M11 completate. Tutti i bug da BUGS-MCP-ORACLE.md (BUG-01–15, R-01–R-17, B2) corretti. C2 (include_raw) e C3 (--until) implementati. 22 tool primitivi bash + 4 Python orchestrati attivi su `lxprworkerlana01:8420`. 107 test --quick bash. OS monitoring completo: os_cpu_stats, os_memory_stats, os_disk_stats, os_network_stats + orchestrato diagnose_os_pressure + lib/os_cmd.sh cross-platform AIX/Linux. Proxy HTTP attivo su porta 80 con ProxyTimeout 300.
+M0–M11 completate. Tutti i 36 bug da BUGS-MCP-ORACLE.md chiusi (BUG-01–15, R-01–R-17, R3-01–R3-04). C2 (include_raw) e C3 (--until) implementati. 22 tool primitivi bash + 4 Python orchestrati attivi su `lxprworkerlana01:8420`. 137 test --quick bash. OS monitoring completo: os_cpu_stats, os_memory_stats, os_disk_stats, os_network_stats + orchestrato diagnose_os_pressure + lib/os_cmd.sh cross-platform AIX/Linux. Proxy HTTP attivo su porta 80 con ProxyTimeout 300.
 `docs/specs/` è la fonte autoritativa — leggerla prima di scrivere codice.
 
 ## Goal
@@ -111,6 +112,8 @@ Fixture in `tests/fixtures/<tool>.ok.json` con header `#ENV=` `#HOST=` `#INST=` 
 30. **Apostrofi nei commenti awk inline**: il programma awk in `'...'` single-quote bash termina se il commento contiene un apostrofo (`c'è`, `quell'iface`). Tutti i commenti dentro `awk '...'` devono evitare apostrofi.
 31. **`netstat -I` AIX richiede nome iface**: su AIX `-I` è un flag che accetta il nome interfaccia (es. `netstat -I en0`), non combinabile come flag autonomo. Per elencare tutte le iface usare `netstat -i`.
 32. **`netstat -i` AIX duplica ogni iface**: ogni iface compare una riga per ogni indirizzo (link#, IP, alias) con contatori identici. Per evitare duplicati nel parser awk: prendere solo la riga con `$3 ~ /link#/`.
+33. **`gawk -f libfile '...'` non funziona**: gawk non supporta `-f file` combinato con un programma awk inline come quarto argomento posizionale. Se si vuole usare una libreria (`-f json_esc.awk`) più un programma aggiuntivo, mettere entrambi in file separati e passare `-f lib.awk -f prog.awk`. Nei test: usare `mktemp` + heredoc per il programma secondario.
+34. **`realpath -m` vs `readlink -f`**: `realpath -m` accetta path inesistenti (non esce con errore se il file non c'è), mentre `readlink -f` richiede che il path esista. Per verificare il path reale di un symlink che potrebbe non esistere, usare `realpath -m` con fallback a `readlink -f`.
 
 ## NFS path structure
 
