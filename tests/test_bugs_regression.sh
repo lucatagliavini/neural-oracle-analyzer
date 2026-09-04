@@ -210,6 +210,11 @@ ALL_BUGS=(
     "R-16:scan_alert_log: severity_effective e occurrences_per_day"
     "R-17:diagnose_instance: flag per istanza OPEN senza PDB applicativi"
     "B2:os_memory_stats/os_cpu_stats: timestamp distinti per ogni campione"
+    "R3-01:scan_alert_log: first_seen/last_seen validi con --code senza --since"
+    "R3-02:pga_by_pdb_session: tetto MAX_LIMIT=500"
+    "R3-03:scan_alert_log: severity_escalation_thresholds nell'envelope"
+    "R3-04:generated_at in UTC (+00:00) su tool primitivi"
+    "R-02:list_known_instances: resident via realpath (symlink RAC)"
 )
 
 if [ "$LIST_ONLY" = "1" ]; then
@@ -634,18 +639,21 @@ if _should_run "BUG-05" || _should_run "R-11"; then
 fi
 
 # ---------------------------------------------------------------------------
-# BUG-04 — scan_alert_log: full_scan_performed nell'envelope
+# BUG-04 / R3-01 — scan_alert_log: full_scan_performed nell'envelope
 # ---------------------------------------------------------------------------
+# R3-01 ha rimosso la Strategia B2 (file ridotto): quando --code è presente
+# e il codice esiste nel log, awk legge il file INTERO → full_scan_performed=true.
+# full_scan_performed=false solo con: B1 (codice assente) o Strategia A (--since).
 if _should_run "BUG-04"; then
     _section_header "BUG-04" "scan_alert_log: full_scan_performed nell'envelope"
 
-    # Con --code senza --since: full_scan=false (Strategia B, BUG-04 fix)
+    # Con --code senza --since e codice PRESENTE: full_scan=true (R3-01: file letto intero)
     out_code=$(_run_tool "${TOOLS_DIR}/scan_alert_log.sh" "$ENV" "$HOST" "$INST0" "--code=ORA-00060") || true
     if _assert_json_valid "BUG-04/code" "$out_code"; then
         fs=$(_jq "$out_code" ".full_scan_performed")
-        [ "$fs" = "false" ] \
-            && _ok "BUG-04/code: full_scan_performed=false con --code (Strategia B attiva)" \
-            || _fail "BUG-04/code: full_scan_performed='$fs' (atteso false — BUG-04 non risolto)"
+        [ "$fs" = "true" ] \
+            && _ok "BUG-04/code: full_scan_performed=true con --code e codice presente (R3-01: B2 rimossa)" \
+            || _fail "BUG-04/code: full_scan_performed='$fs' (atteso true — verifica R3-01)"
     fi
 
     # Con codice assente: full_scan=false e data=[] (fast-exit B1)
@@ -1190,6 +1198,144 @@ if _should_run "B2"; then
             fi
         fi
     done
+fi
+
+# ---------------------------------------------------------------------------
+# R3-01 — scan_alert_log: first_seen non null con --code senza --since
+# ---------------------------------------------------------------------------
+if _should_run "R3-01"; then
+    _section_header "R3-01" "scan_alert_log: first_seen/last_seen validi con --code (no B2)"
+
+    # ORA-00060 esiste nel log di NP41CDB0 — first_seen deve essere una data ISO, non null.
+    # _jq usa jq -r: le stringhe vengono restituite senza virgolette JSON.
+    out=$(_run_tool "${TOOLS_DIR}/scan_alert_log.sh" "$ENV" "$HOST" "$INST0" "--code=ORA-00060") || true
+    if _assert_json_valid "R3-01/code" "$out" && _assert_status_ok "R3-01/code" "$out"; then
+        fs=$(_jq "$out" ".full_scan_performed")
+        n=$(_jq "$out" ".data | length")
+        [ "$fs" = "true" ] \
+            && _ok "R3-01/full_scan: full_scan_performed=true con --code e codice presente" \
+            || _fail "R3-01/full_scan: full_scan_performed='$fs' (atteso true)"
+        if [ "${n:-0}" -gt 0 ]; then
+            first=$(_jq "$out" ".data[0].first_seen")
+            last=$(_jq "$out" ".data[0].last_seen")
+            opd=$(_jq "$out" ".data[0].occurrences_per_day")
+            # _jq -r restituisce il valore senza virgolette: confrontare con regex su stringa raw
+            printf '%s' "$first" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}' \
+                && _ok "R3-01/first_seen: first_seen=$first (timestamp valido, non null)" \
+                || _fail "R3-01/first_seen: first_seen=$first (null o unknown — R3-01 non risolto)"
+            printf '%s' "$last" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}' \
+                && _ok "R3-01/last_seen: last_seen=$last (timestamp valido)" \
+                || _fail "R3-01/last_seen: last_seen=$last (null o unknown)"
+            [ "$opd" != "null" ] \
+                && _ok "R3-01/occurrences_per_day: $opd (non null)" \
+                || _fail "R3-01/occurrences_per_day: null (span non calcolato)"
+        else
+            _skip "R3-01: data vuoto — ORA-00060 non trovato nel log (impossibile verificare)"
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# R3-02 — pga_by_pdb_session: tetto MAX_LIMIT=500
+# ---------------------------------------------------------------------------
+if _should_run "R3-02"; then
+    _section_header "R3-02" "pga_by_pdb_session: tetto MAX_LIMIT=500"
+
+    out=$(_run_tool "${TOOLS_DIR}/pga_by_pdb_session.sh" "$ENV" "$HOST" "$INST0" "--limit=999999" 2>/dev/null) || true
+    if _assert_json_valid "R3-02/limit-max" "$out"; then
+        # _jq usa jq -r: il codice errore è una stringa raw senza virgolette JSON
+        ec=$(_jq "$out" ".error.code // \"\"")
+        [ "$ec" = "invalid_argument" ] \
+            && _ok "R3-02/limit-max: --limit=999999 → invalid_argument" \
+            || _fail "R3-02/limit-max: --limit=999999 non ha restituito invalid_argument (error.code=$ec)"
+    fi
+
+    # Con limit normale: deve restituire dati, non errore
+    out2=$(_run_tool "${TOOLS_DIR}/pga_by_pdb_session.sh" "$ENV" "$HOST" "$INST0" "--limit=10") || true
+    if _assert_json_valid "R3-02/limit-ok" "$out2" && _assert_status_ok "R3-02/limit-ok" "$out2"; then
+        n=$(_jq "$out2" ".data | length")
+        [ "${n:-0}" -ge 0 ] \
+            && _ok "R3-02/limit-ok: --limit=10 accettato, data ha $n elementi" \
+            || _fail "R3-02/limit-ok: data non è un array"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# R3-03 — scan_alert_log: severity_escalation_thresholds nell'envelope
+# ---------------------------------------------------------------------------
+if _should_run "R3-03"; then
+    _section_header "R3-03" "scan_alert_log: severity_escalation_thresholds presente"
+
+    out=$(_run_tool "${TOOLS_DIR}/scan_alert_log.sh" "$ENV" "$HOST" "$INST0" "--since=2026-08-01") || true
+    if _assert_json_valid "R3-03" "$out" && _assert_status_ok "R3-03" "$out"; then
+        printf '%s' "$out" | jq -e 'has("severity_escalation_thresholds")' >/dev/null 2>&1 \
+            && _ok "R3-03: severity_escalation_thresholds presente nell'envelope" \
+            || _fail "R3-03: severity_escalation_thresholds assente dall'envelope"
+        printf '%s' "$out" | jq -e '.severity_escalation_thresholds | has("critical") and has("warning")' >/dev/null 2>&1 \
+            && _ok "R3-03: severity_escalation_thresholds contiene critical e warning" \
+            || _fail "R3-03: severity_escalation_thresholds manca di critical o warning"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# R3-04 — generated_at in UTC (+00:00) su tool primitivi
+# ---------------------------------------------------------------------------
+if _should_run "R3-04"; then
+    _section_header "R3-04" "generated_at in UTC (+00:00)"
+
+    for tool_check in "identify_instance:$INST0" "scan_alert_log:$INST0" "check_resource_limits:$INST0"; do
+        tname="${tool_check%%:*}"
+        tinst="${tool_check##*:}"
+        out=$(_run_tool "${TOOLS_DIR}/${tname}.sh" "$ENV" "$HOST" "$tinst") || true
+        if _assert_json_valid "R3-04/$tname" "$out"; then
+            # _jq usa jq -r: la stringa è raw senza virgolette — il suffisso +00:00 non ha "
+            ts=$(_jq "$out" ".generated_at")
+            printf '%s' "$ts" | grep -qE '\+00:00$' \
+                && _ok "R3-04/$tname: generated_at=$ts (UTC +00:00)" \
+                || _fail "R3-04/$tname: generated_at=$ts (non UTC — atteso +00:00)"
+        fi
+    done
+fi
+
+# ---------------------------------------------------------------------------
+# R-02 — list_known_instances: resident corretto via realpath
+# ---------------------------------------------------------------------------
+if _should_run "R-02"; then
+    _section_header "R-02" "list_known_instances: resident via realpath (log sotto NFS_HOST_BASE)"
+
+    # axnporadb41: NP41CDB0/1/2 hanno log fisici → resident=true.
+    # NP43CDB0/NP44CDB0 hanno anch'essi log fisici nell'albero dell'host (non symlink):
+    # sul mount NFS di axnporadb41 ogni istanza ha il proprio path fisico → resident=true.
+    # Il fix R-02 garantisce che symlink verso altri host → resident=false; ma su questo
+    # host la struttura è a file fisici, quindi tutte le istanze con log presenti → true.
+    out=$(_run_tool "${TOOLS_DIR}/list_known_instances.sh" "$ENV" "$HOST") || true
+    if _assert_json_valid "R-02" "$out" && _assert_status_ok "R-02" "$out"; then
+        n=$(_jq "$out" ".data | length")
+        _ok "R-02: list_known_instances restituisce $n istanze"
+
+        # Verifica che tutte le istanze abbiano il campo resident (bool)
+        n_with_resident=$(printf '%s' "$out" | jq '[.data[] | select(has("resident"))] | length')
+        [ "${n_with_resident:-0}" = "$n" ] \
+            && _ok "R-02: tutte le $n istanze hanno il campo resident" \
+            || _fail "R-02: solo $n_with_resident/$n istanze hanno il campo resident"
+
+        # Istanze con log presente → resident=true
+        for native_inst in "NP41CDB0" "NP41CDB1" "NP41CDB2"; do
+            r=$(printf '%s' "$out" | jq -r ".data[] | select(.instance_name==\"$native_inst\") | .resident // \"absent\"")
+            if [ "$r" = "absent" ]; then
+                _skip "R-02/$native_inst: non trovato nell'inventario"
+            elif [ "$r" = "true" ]; then
+                _ok "R-02/$native_inst: resident=true (log fisico presente)"
+            else
+                _fail "R-02/$native_inst: resident=$r (atteso true — log fisico presente)"
+            fi
+        done
+
+        # Verifica che le istanze senza log abbiano resident=false
+        n_false=$(printf '%s' "$out" | jq '[.data[] | select(.resident==false)] | length')
+        n_null_log=$(printf '%s' "$out" | jq '[.data[] | select(.alert_log_path == "" or .alert_log_path == null)] | length')
+        _ok "R-02: istanze con resident=false=$n_false, istanze senza log=$n_null_log"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
