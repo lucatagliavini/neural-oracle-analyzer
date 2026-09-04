@@ -12,17 +12,14 @@ This file provides guidance to agents when working with code in this repository.
 3. Solo se necessario per la milestone da avviare: leggere il file specs rilevante in [`docs/specs/`](docs/specs/).
 4. Non scrivere codice prima di aver completato i passi 1–2.
 
-**Ultimo file di sessione**: [`docs/sessions/2026-09-13.md`](docs/sessions/2026-09-13.md)
-— Stato: M0–M11 ✅ | tutti i 36 bug BUGS-MCP-ORACLE.md chiusi (R3-01..R3-04, R-02)
-— 26 tool MCP attivi su `lxprworkerlana01:8420` | 137 test --quick bash
-— R3-01: rimossa B2 scan_alert_log | R3-02: MAX_LIMIT=500 pga_by_pdb_session
-— R3-03: severity_escalation_thresholds | R3-04: generated_at UTC in lib/oracle_conn.sh
-— R-02: resident via realpath (symlink RAC) in list_known_instances
-— Gotcha 33-34: gawk -f multi, realpath -m vs readlink -f
+**Ultimo file di sessione**: [`docs/sessions/2026-09-14.md`](docs/sessions/2026-09-14.md)
+— Stato: M0–M11 ✅ | 36 bug chiusi | 142 test --quick
+— Fix: _validate_date_semantic + validazione giorno-per-mese (2026-02-30 → invalid_argument)
+— Gotcha 33-35: gawk -f multi, realpath -m, jq boolean false
 
 ## Project state
 
-M0–M11 completate. Tutti i 36 bug da BUGS-MCP-ORACLE.md chiusi (BUG-01–15, R-01–R-17, R3-01–R3-04). C2 (include_raw) e C3 (--until) implementati. 22 tool primitivi bash + 4 Python orchestrati attivi su `lxprworkerlana01:8420`. 137 test --quick bash. OS monitoring completo: os_cpu_stats, os_memory_stats, os_disk_stats, os_network_stats + orchestrato diagnose_os_pressure + lib/os_cmd.sh cross-platform AIX/Linux. Proxy HTTP attivo su porta 80 con ProxyTimeout 300.
+M0–M11 completate. Tutti i 36 bug da BUGS-MCP-ORACLE.md chiusi (BUG-01–15, R-01–R-17, R3-01–R3-04). C2 (include_raw) e C3 (--until) implementati. 22 tool primitivi bash + 4 Python orchestrati attivi su `lxprworkerlana01:8420`. 142 test --quick bash. OS monitoring completo: os_cpu_stats, os_memory_stats, os_disk_stats, os_network_stats + orchestrato diagnose_os_pressure + lib/os_cmd.sh cross-platform AIX/Linux. Proxy HTTP attivo su porta 80 con ProxyTimeout 300.
 `docs/specs/` è la fonte autoritativa — leggerla prima di scrivere codice.
 
 ## Goal
