@@ -1324,10 +1324,11 @@ if _should_run "R-02"; then
             || _fail "R-02: solo $n_with_age/$n istanze hanno il campo log_age_days"
 
         # Istanze attive: log aggiornato di recente → resident=true
+        # Nota: jq -r '.resident | tostring' serializza il booleano come "true"/"false".
         for active_inst in "NP41CDB0" "NP41CDB1" "NP41CDB2"; do
-            r=$(printf '%s' "$out" | jq -r ".data[] | select(.instance_name==\"$active_inst\") | .resident // \"absent\"")
-            age=$(printf '%s' "$out" | jq -r ".data[] | select(.instance_name==\"$active_inst\") | .log_age_days // \"-1\"")
-            if [ "$r" = "absent" ]; then
+            r=$(printf '%s' "$out" | jq -r ".data[] | select(.instance_name==\"$active_inst\") | .resident | tostring")
+            age=$(printf '%s' "$out" | jq -r ".data[] | select(.instance_name==\"$active_inst\") | .log_age_days")
+            if [ -z "$r" ] || [ "$r" = "null" ]; then
                 _skip "R-02/$active_inst: non trovato nell'inventario"
             elif [ "$r" = "true" ]; then
                 _ok "R-02/$active_inst: resident=true, log_age_days=$age (istanza attiva)"
@@ -1337,10 +1338,12 @@ if _should_run "R-02"; then
         done
 
         # Istanze migrate: log fermo da mesi → resident=false
+        # Nota: jq -r '.resident // "absent"' restituisce "absent" anche per false (boolean falsy).
+        # Usare .resident | tostring per serializzare il booleano come stringa "true"/"false".
         for stale_inst in "NP43CDB0" "NP44CDB0"; do
-            r=$(printf '%s' "$out" | jq -r ".data[] | select(.instance_name==\"$stale_inst\") | .resident // \"absent\"")
-            age=$(printf '%s' "$out" | jq -r ".data[] | select(.instance_name==\"$stale_inst\") | .log_age_days // \"-1\"")
-            if [ "$r" = "absent" ]; then
+            r=$(printf '%s' "$out" | jq -r ".data[] | select(.instance_name==\"$stale_inst\") | .resident | tostring")
+            age=$(printf '%s' "$out" | jq -r ".data[] | select(.instance_name==\"$stale_inst\") | .log_age_days")
+            if [ -z "$r" ] || [ "$r" = "null" ]; then
                 _skip "R-02/$stale_inst: non trovato nell'inventario"
             elif [ "$r" = "false" ]; then
                 _ok "R-02/$stale_inst: resident=false, log_age_days=$age (istanza migrata — R-02 risolto)"
