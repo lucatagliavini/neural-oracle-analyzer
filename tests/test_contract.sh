@@ -396,6 +396,32 @@ test_scan_alert_log_params() {
     else
         _ok "--since=2026-07-21 --until=2026-07-21 accettato dalla validazione"
     fi
+
+    # COLLAUDO-ROUND3 §6: --until + --pdb + --code combinati (gap non coperto prima).
+    # Con NFS presente il tool deve restituire ok o log_not_found, MAI invalid_argument.
+    printf "  [scan_alert_log --until+--pdb+--code combinati → nessun invalid_argument]\n"
+    rc=0
+    out=$("$script" "TEST" "axnporadb41" "NP41CDB1" \
+        "--code=ORA-04036" "--pdb=ANAG2HELP" "--since=2026-07-01" "--until=2026-09-01" 2>/dev/null) || rc=$?
+    err_code=$(printf '%s' "$out" | jq -r '.error.code // empty')
+    if [ "$err_code" = "invalid_argument" ]; then
+        _fail "--code+--pdb+--since+--until combinati restituisce invalid_argument: $err_code"
+    else
+        _ok "--code=ORA-04036 --pdb=ANAG2HELP --since --until combinati accettati (err=${err_code:-none})"
+    fi
+
+    # Verifica che il risultato (se ok) abbia i campi attesi
+    if [ "$rc" = "0" ] && printf '%s' "$out" | jq -e '.status == "ok"' >/dev/null 2>&1; then
+        n=$( printf '%s' "$out" | jq '.data | length')
+        filter_since=$( printf '%s' "$out" | jq -r '.filter_since // empty')
+        filter_until=$( printf '%s' "$out" | jq -r '.filter_until // empty')
+        _ok "--code+--pdb+--since+--until: data=$n entries, filter_since=$filter_since, filter_until=$filter_until"
+        # Verifica che il pdb filtri correttamente (se ci sono risultati, devono essere tutti ANAG2HELP o null)
+        wrong_pdb=$( printf '%s' "$out" | jq '[.data[] | select(.pdb_name != null and .pdb_name != "ANAG2HELP")] | length')
+        [ "${wrong_pdb:-0}" = "0" ] \
+            && _ok "--pdb=ANAG2HELP: nessuna riga con pdb_name diverso da ANAG2HELP o null" \
+            || _fail "--pdb=ANAG2HELP: ${wrong_pdb} righe con pdb_name fuori dal filtro"
+    fi
 }
 
 # --- Test: --until validazione input (quick, no NFS) --------------------------
@@ -438,6 +464,55 @@ test_scan_alert_log_until_quick() {
         _ok "--since=1970-01-01 (anno < 2000) → invalid_argument"
     else
         _fail "--since=1970-01-01 non ha restituito invalid_argument (rc=$rc)"
+    fi
+
+    # Validazione giorno-per-mese (gap COLLAUDO-ROUND3 §6):
+    # giorno impossibile per il mese specifico deve essere rifiutato prima di cercare il log.
+    printf "  [scan_alert_log: --since=2026-02-30 → invalid_argument (30 feb impossibile)]\n"
+    rc=0
+    out=$("$script" "TEST" "axnporadb41" "NP41CDB0" "--since=2026-02-30" 2>/dev/null) || rc=$?
+    if [ "$rc" = "2" ] || ([ "$rc" = "1" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1); then
+        _ok "--since=2026-02-30 (30 febbraio) → invalid_argument"
+    else
+        _fail "--since=2026-02-30 non ha restituito invalid_argument (rc=$rc, code=$(printf '%s' "$out" | jq -r '.error.code // empty'))"
+    fi
+
+    printf "  [scan_alert_log: --since=2026-04-31 → invalid_argument (31 aprile impossibile)]\n"
+    rc=0
+    out=$("$script" "TEST" "axnporadb41" "NP41CDB0" "--since=2026-04-31" 2>/dev/null) || rc=$?
+    if [ "$rc" = "2" ] || ([ "$rc" = "1" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1); then
+        _ok "--since=2026-04-31 (31 aprile) → invalid_argument"
+    else
+        _fail "--since=2026-04-31 non ha restituito invalid_argument (rc=$rc, code=$(printf '%s' "$out" | jq -r '.error.code // empty'))"
+    fi
+
+    printf "  [scan_alert_log: --until=2026-02-30 → invalid_argument (anche per --until)]\n"
+    rc=0
+    out=$("$script" "TEST" "axnporadb41" "NP41CDB0" "--until=2026-02-30" 2>/dev/null) || rc=$?
+    if [ "$rc" = "2" ] || ([ "$rc" = "1" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1); then
+        _ok "--until=2026-02-30 (30 febbraio) → invalid_argument"
+    else
+        _fail "--until=2026-02-30 non ha restituito invalid_argument (rc=$rc, code=$(printf '%s' "$out" | jq -r '.error.code // empty'))"
+    fi
+
+    printf "  [scan_alert_log: --since=2001-02-29 → invalid_argument (29 feb anno non bisestile)]\n"
+    rc=0
+    out=$("$script" "TEST" "axnporadb41" "NP41CDB0" "--since=2001-02-29" 2>/dev/null) || rc=$?
+    if [ "$rc" = "2" ] || ([ "$rc" = "1" ] && printf '%s' "$out" | jq -e '.error.code == "invalid_argument"' >/dev/null 2>&1); then
+        _ok "--since=2001-02-29 (29 feb 2001, non bisestile) → invalid_argument"
+    else
+        _fail "--since=2001-02-29 non ha restituito invalid_argument (rc=$rc, code=$(printf '%s' "$out" | jq -r '.error.code // empty'))"
+    fi
+
+    printf "  [scan_alert_log: --since=2000-02-29 accettata (2000 bisestile)]\n"
+    rc=0
+    out=$("$script" "TEST" "axnporadb41" "NP41CDB0" "--since=2000-02-29" 2>/dev/null) || rc=$?
+    # La data è valida; l'unico errore atteso è log_not_found (no NFS in --quick)
+    err_code=$(printf '%s' "$out" | jq -r '.error.code // empty')
+    if [ "$err_code" != "invalid_argument" ]; then
+        _ok "--since=2000-02-29 (2000 bisestile) accettata (err=$err_code)"
+    else
+        _fail "--since=2000-02-29 rifiutata come invalid_argument (data valida, anno bisestile)"
     fi
 }
 

@@ -90,6 +90,7 @@ fi
 # R-07: validazione semantica delle date.
 # Regex YYYY-MM-DD accetta 2026-13-45 (mese 13, giorno 45) o 1970-01-01.
 # - Date con mese > 12 o giorno > 31: restituire invalid_argument.
+# - Giorno impossibile per il mese (es. 2026-02-30, 2026-04-31): invalid_argument.
 # - Date prima del 2000: data probabilmente errata (i log Oracle iniziano dal ~2000),
 #   restituire invalid_argument con messaggio esplicativo.
 _validate_date_semantic() {
@@ -110,6 +111,26 @@ _validate_date_semantic() {
     if [ "$day" -lt 1 ] || [ "$day" -gt 31 ]; then
         build_error_json "$TOOL" "$ENV" "$HOST" "$INST" \
             "invalid_argument" "--${param_name}: giorno ${day} non valido (1-31)" \
+            "{\"param\":\"${param_name}\",\"received\":\"$val\"}"
+        exit 2
+    fi
+    # Valida giorno massimo per il mese specifico (cattura es. 2026-02-30, 2026-04-31).
+    # Anno bisestile: divisibile per 4, eccetto secoli non divisibili per 400.
+    local max_day
+    case "$month" in
+        4|6|9|11) max_day=30 ;;
+        2)
+            if (( (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 )); then
+                max_day=29
+            else
+                max_day=28
+            fi
+            ;;
+        *) max_day=31 ;;
+    esac
+    if [ "$day" -gt "$max_day" ]; then
+        build_error_json "$TOOL" "$ENV" "$HOST" "$INST" \
+            "invalid_argument" "--${param_name}: giorno ${day} non valido per mese ${month} (max ${max_day})" \
             "{\"param\":\"${param_name}\",\"received\":\"$val\"}"
         exit 2
     fi
